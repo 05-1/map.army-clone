@@ -7,6 +7,6 @@
 // Both values are meant to be public: every visitor's browser needs them, and row level security
 // in the database decides what a visitor may do. NEVER put the service_role / secret key here.
 window.TACMAP_CONFIG = {
-  supabaseUrl: 'https://myivobhcmlftvreefoxk.supabase.co',
+  supabaseUrl: 'https://myivobhcmlftvreefoxk.supabase.co/rest/v1/',
   supabaseAnonKey: 'sb_publishable_o9UlrfcCW5JTIj6ZjBJigg_LRWdrwId',
 };
