@@ -83,12 +83,7 @@ describe('upload sniffing', () => {
   });
 });
 
-describe('post-launch fixes', () => {
-  it('cleanUrl strips API paths pasted from the dashboard', async () => {
-    const { cleanUrl } = await import('../app/lib/supabase');
-    for (const v of ['https://abc.supabase.co', 'https://abc.supabase.co/', 'https://abc.supabase.co/rest/v1/', ' https://abc.supabase.co/auth/v1 '])
-      expect(cleanUrl(v)).toBe('https://abc.supabase.co');
-  });
+describe('basemaps', () => {
   it('asBasemap maps removed or unknown basemaps to satellite', async () => {
     const { asBasemap } = await import('../app/lib/basemaps');
     expect(asBasemap('topo')).toBe('topo');

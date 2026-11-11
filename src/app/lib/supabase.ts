@@ -12,15 +12,7 @@ declare global {
 const cfg = typeof window !== 'undefined' ? window.TACMAP_CONFIG : undefined;
 const ok = (v: string | undefined) => (v && !/YOUR[-_ ]|^\s*$/i.test(v) ? v.trim() : undefined);
 
-/**
- * The bare project URL. People often paste https://<ref>.supabase.co/rest/v1/ (or /auth/v1 ...) from the
- * dashboard; supabase-js appends those paths itself, so a doubled path sends auth calls to PostgREST.
- */
-export function cleanUrl(v: string): string {
-  return v.trim().replace(/\/+$/, '').replace(/\/(rest|auth|storage|realtime|functions)\/v1$/i, '').replace(/\/+$/, '');
-}
-
-export const SUPABASE_URL = (ok(cfg?.supabaseUrl) && cleanUrl(ok(cfg?.supabaseUrl)!)) || (import.meta.env.VITE_SUPABASE_URL as string | undefined);
+export const SUPABASE_URL = ok(cfg?.supabaseUrl)?.replace(/\/+$/, '') ?? (import.meta.env.VITE_SUPABASE_URL as string | undefined);
 export const SUPABASE_KEY = ok(cfg?.supabaseAnonKey) ?? (import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined);
 
 /** The database schema this build of the app expects. Bump together with setup.sql. */

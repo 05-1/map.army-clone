@@ -34,7 +34,7 @@ About 15 minutes, all clicks. You need a GitHub account and a Supabase account, 
 6. Create the database: **SQL Editor > New query**. Open `setup.sql`, copy all of it, paste, click **Run**. It ends with "Success".
 7. Allow players to join: **Authentication > Sign In / Providers**. Turn on **Allow anonymous sign-ins**. Leave **Allow new users to sign up** on.
 8. Tell Supabase where the site lives: **Authentication > URL Configuration**. Set **Site URL** to your address from step 4, including the final slash. This is where confirmation and password-reset emails send you back to.
-9. Copy two values from **Project Settings > API**: the **Project URL** (just `https://<ref>.supabase.co`, no `/rest/v1/` on the end; opening it in a browser tab shows an error, which is normal) and the **anon** (also called publishable) key. Never the `service_role` or secret key.
+9. Copy two values from **Project Settings > API**: the **Project URL** and the **anon** (also called publishable) key. Never the `service_role` or secret key.
 
 **Connect the two**
 

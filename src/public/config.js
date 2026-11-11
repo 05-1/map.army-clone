@@ -2,7 +2,6 @@
 //
 // Where to find them: supabase.com > your project > Project Settings > API.
 //   supabaseUrl      the "Project URL", e.g. https://abcdefghijklmnop.supabase.co
-//                    (just that: no /rest/v1/ on the end. Opening it in a browser tab shows an error; that is normal.)
 //   supabaseAnonKey  the "anon" / "publishable" key
 //
 // Both values are meant to be public: every visitor's browser needs them, and row level security
