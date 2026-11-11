@@ -55,6 +55,18 @@ That is the last time you need Supabase or GitHub to run a game.
 6. **Lock for review.** Every draft appears on your map as ghosts in the player's colour. Drafts not marked ready are flagged "not ready"; you decide whether to accept them. Untick a change to reject it, "Edit on map" to adjust a draft, add a note per player. Conflicts (units of different players ending closer than your conflict distance) are listed and ringed in red.
 7. **Push turn.** The accepted changes land on the live map in one step, the turn is stored in the history, and the next turn opens with the same settings. Only now do players and viewers see anything.
 
+### Tech tree, points and purchases
+
+Players can buy their own reinforcements instead of you allocating them.
+
+- **Tech** (top bar) > **Tech tree**: add items. Each item has a tier (its column), a research cost (0 = available from the start), prerequisites, and, if players can buy it, a unit (NATO symbol or graphic) and a spawn cost. An item can also pay **income** (spawn and/or research points per turn for every unit of it on the map) and be a **spawn point** (bought units may be placed within its radius).
+- **Where bought units may go**, per item: near one of the player's own spawn-point units, inside a spawn zone, either, or anywhere.
+- **Tech > Spawn zones**: draw a polygon or circle, select it, then add it for one player, a team or everyone.
+- **Tech > Player points**: set each player's spawn and research points, hand out points to everyone or a team, and grant or remove research by hand.
+- To make a unit you placed yourself earn income or act as a spawn point, select it and pick its **Tech type** in the properties panel (it must also be assigned to a player).
+- Players research and buy inside their weekly draft. Nothing is charged until you push; a rejected purchase or research costs nothing. Research completes at the push, so a new unlock is usable from the next turn. Income is paid at each push, for the units each player owns after the turn's moves.
+- Balances are stored with every turn, so a rollback restores them. Manual reinforcements (Turn > Reinforcements) still work alongside the tree.
+
 Everyone has a turn slider to step back through earlier turns. Under Manage > History and backup you can view any turn, roll back to one, and download or restore a backup.
 
 ## Updating to a newer version
@@ -87,7 +99,7 @@ Nothing in this table needs Supabase or GitHub. Each control calls a database fu
 | **Maps** | | |
 | Create a map | Manage > Maps > New map | `create_map` |
 | Rename, archive, restore | Manage > Maps (name is also editable in the top bar) | `update_map` |
-| Default basemap | Top bar: Satellite / Topo / Dark | `update_map` |
+| Default basemap | Top bar: Satellite / Topo | `update_map` |
 | Starting view | Top bar: Set start view | `update_map` |
 | Which graphics and symbols players may be given | Manage > Maps > palette | `update_map` |
 | Upload graphics | Graphics tool (G) > Upload | `add_asset` (file goes to admin-only storage) |
@@ -112,6 +124,12 @@ Nothing in this table needs Supabase or GitHub. Each control calls a database fu
 | Lock, unlock | Turn > Lock for review / Unlock | `lock_turn`, `unlock_turn` |
 | Accept or reject single changes, edit a draft, clear it, mark it ready for a player, note per player | Turn > Drafts > a player | `review_draft` |
 | Push | Turn > Push turn | `push_turn` |
+| **Tech tree and points** | | |
+| Add, edit, delete tech items (costs, prerequisites, unit, income, spawn radius, placement) | Tech > Tech tree | `save_tech_item`, `delete_tech_item`, `get_economy` |
+| Spawn and research points per player, hand out points | Tech > Player points | `set_player_points` |
+| Grant or remove research for a player | Tech > Player points > Researched | `set_player_tech` |
+| Spawn zones per player, team or everyone | Tech > Spawn zones | `save_spawn_zone`, `delete_spawn_zone` |
+| Tech type of a unit already on the map | Select on map > properties > Tech type | map edit (row level security) |
 | **History** | | |
 | View any past turn, unfiltered | Turn slider (bottom right), or Manage > History > View | `get_snapshot` |
 | Roll back | Manage > History and backup > Roll back to here | `rollback_to` |
@@ -153,6 +171,7 @@ Client checks exist only to make the pages pleasant. These hold no matter what a
 - After the deadline a draft cannot be saved. After the lock nothing can change, including the ready flag.
 - The push re-checks every accepted draft against the map as it is at that moment. If one change fails, nothing is applied and the message names the player and the reason.
 - Drafts you edit yourself are not held to radius or zone.
+- Research needs its prerequisites researched in an earlier turn; a purchase needs its item researched (or free), enough spawn points for the whole draft, and a legal spot (near the player's own spawn-point unit as it stands on the live map, or in one of their spawn zones, as the item says). The push checks all of it again. A player cannot turn a free drawing into an income source: only purchases and your own edits set a unit's tech type.
 - Snapshots cannot be changed or deleted, not even by an admin.
 - Old turns are filtered by the same layer rules as the live map, on the server. A viewer or player never receives a layer their link does not include, in any turn.
 - A rollback restores the map and opens a new turn labelled "rolled back from turn N". Later turns stay in the history and the drafts of the abandoned turn are kept.
@@ -178,13 +197,12 @@ Manage > Settings: paste a webhook URL (Discord: channel settings > Integrations
 
 ## Basemaps and licences
 
-All three basemaps are free and need no key. Fine for a private game; check the terms before anything commercial or high-traffic.
+Both basemaps are free and need no key. Fine for a private game; check the terms before anything commercial or high-traffic.
 
 | Basemap | Source | Notes |
 | --- | --- | --- |
 | Satellite | Esri World Imagery | Attribution required. Esri expects an ArcGIS account for production apps |
 | Topo | OpenTopoMap | CC-BY-SA, volunteer-run, max zoom 17, no bulk downloading |
-| Dark | CARTO Dark Matter | Free for non-commercial use within CARTO's limits |
 
 Libraries: MapLibre GL JS (BSD-3), milsymbol (MIT), Turf (MIT), DOMPurify (Apache-2.0/MPL-2.0), supabase-js (MIT), zustand (MIT), React (MIT).
 
@@ -203,6 +221,6 @@ npm run dev          # dev server; put VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KE
 npm run release      # typecheck, build into src/dist, then copy the site into the repository root (keeps config.js)
 ```
 
-`npm run fake` runs the real `setup.sql` in an in-process Postgres behind a small stand-in for Supabase's API, so the whole app can be tried with no account. `tests/e2e/scenario.mjs` drives a complete turn through it in a headless browser (needs Playwright installed separately).
+`npm run fake` runs the real `setup.sql` in an in-process Postgres behind a small stand-in for Supabase's API, so the whole app can be tried with no account. `tests/e2e/scenario.mjs` drives a complete turn through it in a headless browser, and `tests/e2e/tech.mjs` the tech tree (both need Playwright installed separately).
 
 When you change the database, edit `supabase/setup.sql`, raise the number in its last statement and `SCHEMA_VERSION` in `app/lib/supabase.ts` together, and keep the file re-runnable: `tests/upgrade.test.ts` runs it over an older schema and twice in a row.

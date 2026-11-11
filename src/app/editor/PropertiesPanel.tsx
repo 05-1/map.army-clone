@@ -72,6 +72,7 @@ export function PropertiesPanel({ onAssign }: { onAssign?: (ids: string[], playe
   const layers = useEd((s) => s.layers);
   const assets = useEd((s) => s.assets);
   const players = useEd((s) => s.players);
+  const techItems = useEd((s) => s.bundle?.economy.items);
   const nameRef = useRef<HTMLTextAreaElement>(null);
   const st = useEd.getState;
 
@@ -169,6 +170,19 @@ export function PropertiesPanel({ onAssign }: { onAssign?: (ids: string[], playe
             {common(sel, (f) => f.owner_player_id ?? '') === undefined && <option value="__mixed" disabled>Mixed</option>}
             <option value="">Nobody (owner only)</option>
             {players.map((p) => <option key={p.id} value={p.id}>{p.name}{p.team ? ` · ${p.team}` : ''}{p.revoked ? ' (revoked)' : ''}</option>)}
+          </select>
+        </Field>
+      )}
+      {techItems && techItems.length > 0 && sel.every((f) => f.kind === 'symbol' || f.kind === 'asset') && (
+        <Field label="Tech type (pays income, may be a spawn point)" wide>
+          <select value={common(sel, (f) => f.props.tech ?? '') ?? '__mixed'} onChange={(e) => (cp(), setP({ tech: e.target.value || undefined }))}>
+            {common(sel, (f) => f.props.tech ?? '') === undefined && <option value="__mixed" disabled>Mixed</option>}
+            <option value="">None</option>
+            {techItems.map((t) => (
+              <option key={t.id} value={t.id}>
+                {t.name}{t.income_spawn || t.income_research ? ` (+${t.income_spawn} spawn, +${t.income_research} research)` : ''}{t.spawn_radius_m ? ' · spawn point' : ''}
+              </option>
+            ))}
           </select>
         </Field>
       )}

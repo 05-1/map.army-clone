@@ -10,7 +10,8 @@ import { hitLayers, SceneRenderer } from '../lib/scene';
 import { anchorOf, baseId, clampToRadius, ghostFeatures, GHOST_LAYERS, inZone, zonePolygon } from '../lib/submissions';
 import { publicAssetUrl } from '../lib/supabase';
 import type { Asset, CreatePayload, Feature, Pos } from '../lib/types';
-import { effective, remaining, usePlay, type PTool } from './store';
+import { canPlace, isUnlocked, placementText } from '../lib/tech';
+import { effective, pointsLeft, remaining, usePlay, type PTool } from './store';
 
 const S = () => usePlay.getState();
 const OVERLAY = 'play-overlay';
@@ -62,7 +63,7 @@ export class PlayController {
         this.cursor = null;
         map.getCanvas().style.cursor = s.tool === 'select' ? '' : 'crosshair';
       }
-      if (s.state !== p.state || s.draft !== p.draft || s.sel !== p.sel || s.tool !== p.tool || s.allocId !== p.allocId || s.viewing !== p.viewing) this.draw();
+      if (s.state !== p.state || s.draft !== p.draft || s.sel !== p.sel || s.tool !== p.tool || s.allocId !== p.allocId || s.buyId !== p.buyId || s.viewing !== p.viewing) this.draw();
     });
     this.draw();
   }
@@ -78,10 +79,10 @@ export class PlayController {
   private color = () => S().state?.player.color ?? DEFAULT_COLOR;
 
   private draw() {
-    const { state, draft, sel, viewing, tool, allocId } = S();
+    const { state, draft, sel, viewing, tool, allocId, buyId } = S();
     if (!state) return;
-    // Allocation graphics may not be on the live map yet, so they are not in state.assets.
-    const assets = new Map([...state.allocation_assets, ...state.assets, ...(viewing?.assets ?? [])].map((a) => [a.id, a]));
+    // Allocation and tech graphics may not be on the live map yet, so they are not in state.assets.
+    const assets = new Map([...state.allocation_assets, ...(state.tech_assets ?? []), ...state.assets, ...(viewing?.assets ?? [])].map((a) => [a.id, a]));
     const out: GjFeature[] = [];
     const add = (geometry: GjFeature['geometry'], o: string) => out.push({ type: 'Feature', geometry, properties: { o } });
     const e = effective(sel);
@@ -102,6 +103,12 @@ export class PlayController {
       }
       const alloc = tool === 'place' ? state.allocations.find((a) => a.id === allocId) : e?.change?.op === 'create' ? state.allocations.find((a) => a.id === (e.change as { payload: CreatePayload }).payload.allocation_id) : undefined;
       if (alloc?.zone) add(zonePolygon(alloc.zone), 'zone');
+      // Where a purchase may go: spawn zones and the circles around this player's spawn-point units.
+      const buyItem = state.tech.find((x) => x.id === (tool === 'buy' ? buyId : e?.change?.op === 'create' ? (e.change as { payload: CreatePayload }).payload.purchase_id : null));
+      if (buyItem && buyItem.placement !== 'anywhere') {
+        if (buyItem.placement !== 'spawn') for (const z of state.spawn_zones) add(zonePolygon(z.zone), 'zone');
+        if (buyItem.placement !== 'zone') for (const sp of state.spawn_points) add(circlePoly(sp.center, sp.radius_m), 'zone');
+      }
     }
     if (e) add(e.f.geometry, e.f.geometry.type === 'Point' ? 'selpt' : 'sel');
     if (this.pts) {
@@ -123,7 +130,7 @@ export class PlayController {
 
   private create(payload: CreatePayload) {
     const id = crypto.randomUUID();
-    if (S().put({ op: 'create', feature_id: id, payload })) usePlay.setState({ sel: id, tool: 'select', allocId: null });
+    if (S().put({ op: 'create', feature_id: id, payload })) usePlay.setState({ sel: id, tool: 'select', allocId: null, buyId: null });
   }
 
   private place(tool: PTool, at: Pos) {
@@ -132,6 +139,7 @@ export class PlayController {
     if (tool === 'text') {
       return this.create({ kind: 'text', geometry, props: { name: 'Note', fontSize: 16 }, style: { color: this.color() } });
     }
+    if (tool === 'buy') return this.buy(at);
     // Reinforcements come out of an allocation; the allocation decides what the unit is.
     const a = s.state?.allocations.find((x) => x.id === s.allocId);
     if (!a) return s.say('Pick a reinforcement first');
@@ -142,6 +150,23 @@ export class PlayController {
     else this.create({ kind: 'symbol', geometry, allocation_id: a.id, props: { ...a.props, sidc: a.sidc ?? undefined } });
     // Keep placing while there are units left in the allocation.
     if (left > 0 && S().sel) usePlay.setState({ tool: 'place', allocId: a.id });
+  }
+
+  /** Buy one unit of the picked tech item and put it here. The tech item decides what the unit is. */
+  private buy(at: Pos) {
+    const s = S();
+    const st = s.state;
+    const it = st?.tech.find((x) => x.id === s.buyId);
+    if (!st || !it) return s.say('Pick something to buy first');
+    if (!isUnlocked(it, st.economy.tech_unlocked)) return s.say(`${it.name} is not researched yet`);
+    if (pointsLeft().spawn < it.spawn_cost) return s.say(`Not enough spawn points for ${it.name}`);
+    if (!canPlace(it, at, st.spawn_zones, st.spawn_points)) return s.say(`${it.name} must be placed ${placementText(it.placement)} (dashed outlines)`);
+    const geometry: Feature['geometry'] = { type: 'Point', coordinates: at };
+    const props = { ...it.props, name: it.props.name || it.name };
+    if (it.asset_id) this.create({ kind: 'asset', geometry, asset_id: it.asset_id, purchase_id: it.id, props });
+    else this.create({ kind: 'symbol', geometry, purchase_id: it.id, props: { ...props, sidc: it.sidc ?? undefined } });
+    // Keep buying while the player can afford another.
+    if (pointsLeft().spawn >= it.spawn_cost && S().sel) usePlay.setState({ tool: 'buy', buyId: it.id });
   }
 
   private finish() {
@@ -176,6 +201,8 @@ export class PlayController {
     if (!eff || !s.state) return null;
     if (eff.isNew) {
       const c = eff.change as { payload: CreatePayload };
+      const bought = c.payload.purchase_id ? s.state.tech.find((x) => x.id === c.payload.purchase_id) : undefined;
+      if (bought) return canPlace(bought, want, s.state.spawn_zones, s.state.spawn_points) ? want : null;
       const zone = s.state.allocations.find((a) => a.id === c.payload.allocation_id)?.zone ?? null;
       return inZone(zone, want) ? want : null;
     }

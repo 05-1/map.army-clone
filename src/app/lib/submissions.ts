@@ -3,7 +3,7 @@
 // Nothing here is a security boundary; the database re-validates every change on submit and on approval.
 import type { Polygon } from 'geojson';
 import { bearing, circlePoly, coordsOf, destinationPt, distanceM, norm360 } from './geo';
-import { DEFAULT_STYLE, type Change, type Draft, type Feature, type Kind, type Pos, type UpdatePayload, type Zone } from './types';
+import { DEFAULT_STYLE, type Change, type Draft, type Feature, type Kind, type Pos, type TechItem, type UpdatePayload, type Zone } from './types';
 
 export const GHOST_LAYER = 'ghost';
 export const GHOST_LAYERS = [{ id: GHOST_LAYER, z: 0 }];
@@ -36,6 +36,7 @@ export function applyUpdate(f: Feature, u: UpdatePayload): Feature {
 /** The object a change is about, as it would look once approved. Null for deletes and unknown targets. */
 export function proposed(c: Change, live: Map<string, Feature>): Feature | null {
   if (c.op === 'create') return featureFromCreate(c);
+  if (c.op === 'research') return null;
   const f = live.get(c.feature_id);
   if (!f || c.op === 'delete') return null;
   return applyUpdate(f, c.payload);
@@ -68,6 +69,7 @@ export function ghostFeatures(changes: Change[], live: Feature[], color = '#f2a9
 
   changes.forEach((c, i) => {
     const z = i * 4;
+    if (c.op === 'research') return;
     if (c.op === 'create') {
       out.push(featureFromCreate(c, z + 1));
       return;
@@ -96,10 +98,16 @@ export function ghostFeatures(changes: Change[], live: Feature[], color = '#f2a9
 
 const nameOf = (f: Feature | undefined) => clip(f?.props.name?.split('\n')[0] || (f ? KIND_NAME[f.kind] : 'unknown object'), 40);
 
-/** One line per change, for lists. */
-export function describeChange(c: Change, live: Map<string, Feature>): string {
+/** One line per change, for lists. Pass the tech tree to name research and purchases. */
+export function describeChange(c: Change, live: Map<string, Feature>, tech: readonly TechItem[] = []): string {
+  if (c.op === 'research') {
+    const it = tech.find((x) => x.id === c.feature_id);
+    return `Research ${it ? clip(it.name, 40) : 'unknown item'}${it?.research_cost ? ` (${it.research_cost} research)` : ''}`;
+  }
   if (c.op === 'create') {
     const n = c.payload.props?.name?.split('\n')[0];
+    const it = c.payload.purchase_id ? tech.find((x) => x.id === c.payload.purchase_id) : undefined;
+    if (c.payload.purchase_id) return `Buy ${clip(it?.name ?? 'unit', 30)}${n && n !== it?.name ? `: ${clip(n, 30)}` : ''}${it?.spawn_cost ? ` (${it.spawn_cost} spawn)` : ''}`;
     return `New ${KIND_NAME[c.payload.kind]}${n ? `: ${clip(n, 40)}` : ''}`;
   }
   const f = live.get(c.feature_id);
@@ -116,7 +124,8 @@ export function summarize(changes: Change[]): string {
   const n = new Map<string, number>();
   const add = (k: string) => n.set(k, (n.get(k) ?? 0) + 1);
   for (const c of changes) {
-    if (c.op === 'create') add(`new ${KIND_NAME[c.payload.kind]}`);
+    if (c.op === 'research') add('research');
+    else if (c.op === 'create') add(c.payload.purchase_id ? 'purchase' : `new ${KIND_NAME[c.payload.kind]}`);
     else if (c.op === 'delete') add('removal');
     else {
       if (c.payload.geometry) add('move');
@@ -125,7 +134,7 @@ export function summarize(changes: Change[]): string {
     }
   }
   if (!n.size) return 'No changes';
-  return [...n].map(([k, v]) => `${v} ${k}${v > 1 ? 's' : ''}`).join(', ');
+  return [...n].map(([k, v]) => `${v} ${k}${v > 1 && k !== 'research' ? 's' : ''}`).join(', ');
 }
 
 /**
@@ -228,7 +237,7 @@ export function findConflicts(live: Feature[], drafts: { player_id: string; chan
       else if (c.op === 'create') {
         const f = featureFromCreate(c);
         if (isUnit(f)) end.set(f.id, { pos: f.geometry.coordinates as Pos, owner: d.player_id, touched: true });
-      } else if (c.payload.geometry && end.has(c.feature_id)) {
+      } else if (c.op === 'update' && c.payload.geometry && end.has(c.feature_id)) {
         const f = byId.get(c.feature_id)!;
         end.set(c.feature_id, { pos: anchorOf(c.payload.geometry), owner: f.owner_player_id ?? null, touched: true });
       }

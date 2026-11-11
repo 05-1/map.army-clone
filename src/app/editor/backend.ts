@@ -5,7 +5,7 @@ import { asBasemap } from '../lib/basemaps';
 import type { RealtimeChannel, SupabaseClient } from '@supabase/supabase-js';
 import type { Diff } from '../lib/diff';
 import { ASSET_BUCKET, liveChannelName, publicAssetUrl, supabase } from '../lib/supabase';
-import type { Allocation, Asset, Change, Feature, Layer, MapMeta, Player, ShareLink, SnapshotPayload, Turn, TurnBundle } from '../lib/types';
+import type { Allocation, Asset, Change, Economy, Feature, Layer, MapMeta, Player, ShareLink, SnapshotPayload, SpawnZone, TechItem, Turn, TurnBundle } from '../lib/types';
 import type { PreparedUpload } from '../lib/upload';
 
 export interface NewLink {
@@ -223,6 +223,17 @@ export class Backend {
   unlockTurn = (turnId: string) => this.rpc<void>('unlock_turn', { p_turn_id: turnId });
   reviewDraft = (turnId: string, playerId: string, patch: DraftReview) => this.rpc<void>('review_draft', { p_turn_id: turnId, p_player_id: playerId, p_patch: patch });
   pushTurn = (turnId: string) => this.rpc<{ pushed: number; next: number; applied: number }>('push_turn', { p_turn_id: turnId });
+
+  // ---- tech tree and points ----
+  getEconomy = (mapId: string) => this.rpc<Economy>('get_economy', { p_map_id: mapId });
+  saveTechItem = (mapId: string, item: Partial<TechItem>) => this.rpc<string>('save_tech_item', { p_map_id: mapId, p: item });
+  deleteTechItem = (id: string) => this.rpc<void>('delete_tech_item', { p_item_id: id });
+  saveSpawnZone = (mapId: string, z: Partial<SpawnZone>) => this.rpc<string>('save_spawn_zone', { p_map_id: mapId, p: z });
+  deleteSpawnZone = (id: string) => this.rpc<void>('delete_spawn_zone', { p_zone_id: id });
+  setPlayerPoints = (playerId: string, spawn: number | null, research: number | null) =>
+    this.rpc<void>('set_player_points', { p_player_id: playerId, p_spawn: spawn, p_research: research });
+  setPlayerTech = (playerId: string, itemId: string, unlocked: boolean) =>
+    this.rpc<void>('set_player_tech', { p_player_id: playerId, p_item_id: itemId, p_unlocked: unlocked });
 
   // ---- history ----
   getSnapshot = (mapId: string, turn: number) => this.rpc<SnapshotPayload | null>('get_snapshot', { p_map_id: mapId, p_turn: turn });

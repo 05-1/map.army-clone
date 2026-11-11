@@ -5,6 +5,7 @@ import { fmtDist } from '../lib/geo';
 import { symbolDataUrl } from '../lib/images';
 import { ago, describeChange, effectiveChanges, findConflicts, fmtWhen, summarize, zoneFromFeature } from '../lib/submissions';
 import { buildSidc } from '../lib/symbols';
+import { draftCost, fmtPts } from '../lib/tech';
 import type { Allocation, Draft, Feature, MapMeta, Player, Turn, Zone } from '../lib/types';
 import type { Backend, TurnPatch } from './backend';
 import { useEd } from './store';
@@ -331,6 +332,10 @@ function Drafts({ backend, turn, act }: { backend: Backend; turn: Turn; act: Act
     return nameOf(live.get(id));
   };
   const st = useEd.getState;
+  const costLine = (d: Draft) => {
+    const c = draftCost(d.owner_changes ?? d.changes, bundle.economy.items, d.rejected);
+    return c.spawn || c.research ? ` · spends ${[c.spawn && `${fmtPts(c.spawn)} spawn`, c.research && `${fmtPts(c.research)} research`].filter(Boolean).join(', ')}` : '';
+  };
 
   return (
     <>
@@ -348,7 +353,7 @@ function Drafts({ backend, turn, act }: { backend: Backend; turn: Turn; act: Act
                     <span className={`tag ${d?.ready ? 'ok' : n ? 'warn' : ''}`}>{d?.ready ? 'ready' : n ? 'not ready' : 'nothing yet'}</span>
                     <time>{d && n ? ago(d.updated_at) : `seen ${ago(p.last_seen_at)}`}</time>
                   </span>
-                  <span className="what">{d && n ? summarize(effectiveChanges(d)) : 'Stays put'}{d?.rejected.length ? ` · ${d.rejected.length} rejected` : ''}{d?.owner_changes ? ' · edited by you' : ''}</span>
+                  <span className="what">{d && n ? summarize(effectiveChanges(d)) : 'Stays put'}{d && n ? costLine(d) : ''}{d?.rejected.length ? ` · ${d.rejected.length} rejected` : ''}{d?.owner_changes ? ' · edited by you' : ''}</span>
                 </button>
                 {open === p.id && <DraftDetail backend={backend} turn={turn} player={p} draft={d} act={act} editing={review?.playerId === p.id} live={live} />}
               </li>
@@ -377,7 +382,10 @@ function Drafts({ backend, turn, act }: { backend: Backend; turn: Turn; act: Act
 function DraftDetail(p: { backend: Backend; turn: Turn; player: Player; draft?: Draft; act: Act; editing: boolean; live: Map<string, Feature> }) {
   const { backend, turn, player, draft, act, editing, live } = p;
   const allocations = useEd((s) => s.bundle!.allocations);
+  const economy = useEd((s) => s.bundle!.economy);
   const changes = draft ? draft.owner_changes ?? draft.changes : [];
+  const bal = economy.players.find((e) => e.id === player.id);
+  const cost = draftCost(changes, economy.items, draft?.rejected ?? []);
   const rejected = new Set(draft?.rejected ?? []);
   const review = (patch: Parameters<Backend['reviewDraft']>[2]) => act(() => backend.reviewDraft(turn.id, player.id, patch));
   const toggle = (id: string) => {
@@ -400,7 +408,7 @@ function DraftDetail(p: { backend: Backend; turn: Turn; player: Player; draft?: 
                 <label className="row">
                   <input type="checkbox" checked={!rejected.has(c.feature_id)} onChange={() => void toggle(c.feature_id)} aria-label="Accept this change" />
                   <span>
-                    {describeChange(c, live)}
+                    {describeChange(c, live, economy.items)}
                     {alloc && <small> · from {alloc.team ? `team ${alloc.team} pool` : 'own allocation'}</small>}
                     {c.op === 'update' && c.payload.order && <small> · “{c.payload.order}”</small>}
                   </span>
@@ -410,7 +418,14 @@ function DraftDetail(p: { backend: Backend; turn: Turn; player: Player; draft?: 
           })}
         </ul>
       )}
-      <p className="tip">Untick a change to reject it. A rejected placement goes back into its allocation.</p>
+      {bal && (
+        <p className="points">
+          <span>Spawn <b className={cost.spawn > bal.spawn_points ? 'neg' : ''}>{fmtPts(cost.spawn)}</b> of {fmtPts(bal.spawn_points)}</span>
+          <span>Research <b className={cost.research > bal.research_points ? 'neg' : ''}>{fmtPts(cost.research)}</b> of {fmtPts(bal.research_points)}</span>
+          <span>Income +{fmtPts(bal.income.spawn)} / +{fmtPts(bal.income.research)}</span>
+        </p>
+      )}
+      <p className="tip">Untick a change to reject it. A rejected placement goes back into its allocation; a rejected purchase or research costs nothing.</p>
       <div className="row2 wrap">
         <button type="button" className={`btn sm${editing ? ' on' : ''}`} disabled={!changes.length} onClick={() => useEd.getState().setReview(editing ? null : player.id)}>
           {editing ? 'Done editing' : 'Edit on map'}

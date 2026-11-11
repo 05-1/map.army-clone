@@ -17,6 +17,7 @@ import { PlayersDialog } from './PlayersDialog';
 import { PropertiesPanel, StylePanel } from './PropertiesPanel';
 import { ReviewOverlay } from './reviewOverlay';
 import { ShareDialog } from './ShareDialog';
+import { TechDialog } from './TechDialog';
 import { TurnPanel } from './TurnPanel';
 import { useEd, type Tool } from './store';
 import { Icon, IconButton, Section } from './ui';
@@ -93,6 +94,7 @@ function Workspace({ backend, who, meta, maps, setMaps, onSignOut, onSwitch, onP
   const [sharing, setSharing] = useState(false);
   const [managingPlayers, setManagingPlayers] = useState(false);
   const [admin, setAdmin] = useState<AdminTab | null>(null);
+  const [teching, setTeching] = useState(false);
 
   const tool = useEd((s) => s.tool);
   const snap = useEd((s) => s.snap);
@@ -283,6 +285,7 @@ function Workspace({ backend, who, meta, maps, setMaps, onSignOut, onSwitch, onP
           Set start view
         </button>
         <button type="button" className="btn" onClick={() => setManagingPlayers(true)}>Players</button>
+        <button type="button" className="btn" title="Tech tree, player points and spawn zones" onClick={() => setTeching(true)}>Tech</button>
         <button
           type="button"
           className={`btn${turnOpen ? ' on' : ''}`}
@@ -339,6 +342,7 @@ function Workspace({ backend, who, meta, maps, setMaps, onSignOut, onSwitch, onP
       </footer>
 
       {sharing && <ShareDialog backend={backend} map={meta} flush={() => flushRef.current()} onClose={() => setSharing(false)} />}
+      {teching && <TechDialog backend={backend} map={meta} refresh={refreshTurn} onClose={() => setTeching(false)} />}
       {managingPlayers && <PlayersDialog backend={backend} map={meta} settle={settle} onClose={() => setManagingPlayers(false)} />}
       {admin && (
         <AdminDialog
