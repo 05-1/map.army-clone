@@ -192,7 +192,7 @@ Free-tier limits that matter: Supabase 500 MB database and 1 GB file storage; Gi
 
 ## Changing the code
 
-The source is in the `src` folder next to `release` in the project archive. It is not needed to run the site.
+The source is in the `src` folder of this repository. GitHub Pages serves the built files in the repository root; `src` is not needed to run the site.
 
 ```bash
 cd src
@@ -200,7 +200,7 @@ npm install
 npm test             # database rules against a real Postgres (PGlite) + unit tests
 npm run fake         # the built site on http://localhost:54399 with a throwaway local database
 npm run dev          # dev server; put VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY in .env.local
-npm run release      # typecheck, build, and regenerate ../release
+npm run release      # typecheck, build into src/dist, then copy the site into the repository root (keeps config.js)
 ```
 
 `npm run fake` runs the real `setup.sql` in an in-process Postgres behind a small stand-in for Supabase's API, so the whole app can be tried with no account. `tests/e2e/scenario.mjs` drives a complete turn through it in a headless browser (needs Playwright installed separately).
