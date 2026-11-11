@@ -34,7 +34,7 @@ About 15 minutes, all clicks. You need a GitHub account and a Supabase account, 
 6. Create the database: **SQL Editor > New query**. Open `setup.sql`, copy all of it, paste, click **Run**. It ends with "Success".
 7. Allow players to join: **Authentication > Sign In / Providers**. Turn on **Allow anonymous sign-ins**. Leave **Allow new users to sign up** on.
 8. Tell Supabase where the site lives: **Authentication > URL Configuration**. Set **Site URL** to your address from step 4, including the final slash. This is where confirmation and password-reset emails send you back to.
-9. Copy two values from **Project Settings > API**: the **Project URL** and the **anon** (also called publishable) key. Never the `service_role` or secret key.
+9. Copy two values from **Project Settings > API**: the **Project URL** (just `https://<ref>.supabase.co`, no `/rest/v1/` on the end; opening it in a browser tab shows an error, which is normal) and the **anon** (also called publishable) key. Never the `service_role` or secret key.
 
 **Connect the two**
 
@@ -192,7 +192,7 @@ Free-tier limits that matter: Supabase 500 MB database and 1 GB file storage; Gi
 
 ## Changing the code
 
-The source is in the `src` folder next to `release` in the project archive. It is not needed to run the site.
+The source is in the `src` folder of this repository. GitHub Pages serves the built files in the repository root; `src` is not needed to run the site.
 
 ```bash
 cd src
@@ -200,7 +200,7 @@ npm install
 npm test             # database rules against a real Postgres (PGlite) + unit tests
 npm run fake         # the built site on http://localhost:54399 with a throwaway local database
 npm run dev          # dev server; put VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY in .env.local
-npm run release      # typecheck, build, and regenerate ../release
+npm run release      # typecheck, build into src/dist, then copy the site into the repository root (keeps config.js)
 ```
 
 `npm run fake` runs the real `setup.sql` in an in-process Postgres behind a small stand-in for Supabase's API, so the whole app can be tried with no account. `tests/e2e/scenario.mjs` drives a complete turn through it in a headless browser (needs Playwright installed separately).

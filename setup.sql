@@ -68,7 +68,7 @@ create table if not exists public.maps (
   id           uuid primary key default gen_random_uuid(),
   owner_id     uuid default auth.uid(),
   name         text not null default 'Untitled map' check (char_length(name) between 1 and 120),
-  basemap      text not null default 'dark' check (basemap in ('satellite', 'topo', 'dark')),
+  basemap      text not null default 'satellite' check (basemap in ('satellite', 'topo', 'dark')),  -- 'dark' kept legal for old backups; the app shows it as satellite
   center       double precision[] not null default '{0,20}' check (array_length(center, 1) = 2),
   zoom         double precision not null default 2,
   live_channel uuid not null default gen_random_uuid(),
@@ -80,6 +80,7 @@ alter table public.maps
   add column if not exists palette_symbols boolean not null default true,
   add column if not exists archived        boolean not null default false;
 -- Maps belong to the installation, not to one account: removing an admin must not delete maps.
+alter table public.maps alter column basemap set default 'satellite';
 alter table public.maps alter column owner_id drop not null;
 alter table public.maps drop constraint if exists maps_owner_id_fkey;
 alter table public.maps add constraint maps_owner_id_fkey foreign key (owner_id) references auth.users (id) on delete set null;
