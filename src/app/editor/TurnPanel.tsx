@@ -3,9 +3,9 @@
 import { useMemo, useState } from 'react';
 import { fmtDist } from '../lib/geo';
 import { symbolDataUrl } from '../lib/images';
-import { ago, describeChange, effectiveChanges, findConflicts, fmtWhen, summarize, zoneFromFeature } from '../lib/submissions';
+import { ago, describeChange, effectiveChanges, findConflicts, fmtWhen, summarize, zoneFromFeature, zoneText } from '../lib/submissions';
 import { buildSidc } from '../lib/symbols';
-import { draftCost, fmtPts } from '../lib/tech';
+import { draftCost, fmtPts, toggleRejected } from '../lib/tech';
 import type { Allocation, Draft, Feature, MapMeta, Player, Turn, Zone } from '../lib/types';
 import type { Backend, TurnPatch } from './backend';
 import { useEd } from './store';
@@ -208,7 +208,6 @@ function MoveRules({ backend, turn, act }: { backend: Backend; turn: Turn; act: 
   );
 }
 
-const zoneText = (z: Zone) => (!z ? 'anywhere' : 'center' in z ? `within ${fmtDist(z.radius_m)} of a point` : 'inside a drawn area');
 
 function Allocations({ backend, turn, act }: { backend: Backend; turn: Turn; act: Act }) {
   const allocations = useEd((s) => s.bundle!.allocations);
@@ -388,12 +387,7 @@ function DraftDetail(p: { backend: Backend; turn: Turn; player: Player; draft?: 
   const cost = draftCost(changes, economy.items, draft?.rejected ?? []);
   const rejected = new Set(draft?.rejected ?? []);
   const review = (patch: Parameters<Backend['reviewDraft']>[2]) => act(() => backend.reviewDraft(turn.id, player.id, patch));
-  const toggle = (id: string) => {
-    const next = new Set(rejected);
-    if (next.has(id)) next.delete(id);
-    else next.add(id);
-    return review({ rejected: [...next] });
-  };
+  const toggle = (id: string) => review({ rejected: toggleRejected(changes, [...rejected], id) });
 
   return (
     <div className="draft">

@@ -1,4 +1,4 @@
-import type { LineString, Point, Polygon } from 'geojson';
+import type { LineString, MultiPolygon, Point, Polygon } from 'geojson';
 
 export type Kind = 'symbol' | 'asset' | 'text' | 'line' | 'arrow' | 'polygon' | 'circle' | 'freehand';
 export type Dash = 'solid' | 'dash' | 'dot';
@@ -187,8 +187,8 @@ export interface Turn {
   frozen: boolean;
 }
 
-/** Where an allocation may be placed: anywhere, inside a polygon, or within a radius of a point. */
-export type Zone = null | Polygon | { center: Pos; radius_m: number };
+/** Where a unit may be placed: anywhere, inside a polygon or a country (MultiPolygon), or within a radius of a point. */
+export type Zone = null | Polygon | MultiPolygon | { center: Pos; radius_m: number };
 
 export interface MoveRule {
   feature_id: string | null;
@@ -245,6 +245,15 @@ export interface TechItem {
   /** Metres. Set = units of this type are spawn points. */
   spawn_radius_m: number | null;
   placement: Placement;
+  /** A production building (usually a spawn point that cannot move) or a unit. */
+  category: 'unit' | 'building';
+  /** False: players cannot move it once placed. */
+  can_move: boolean;
+  /** Buildings that produce this unit; empty = any of the player's spawn points. */
+  spawn_from: string[];
+  /** Place in the flowchart; null = laid out by tier. */
+  pos_x: number | null;
+  pos_y: number | null;
 }
 
 export interface SpawnZone {
@@ -317,7 +326,7 @@ export interface PlayerState {
   /** Spawn zones that apply to this player. */
   spawn_zones: Pick<SpawnZone, 'id' | 'name' | 'zone'>[];
   /** This player's own units that are spawn points, where they stand now. */
-  spawn_points: { feature_id: string; center: Pos; radius_m: number; name: string }[];
+  spawn_points: { feature_id: string; center: Pos; radius_m: number; name: string; item_id: string }[];
   /** Outcome of the most recent pushed turn. */
   last: { number: number; applied: boolean; changes: Change[]; edited: boolean; rejected: string[]; owner_note: string | null } | null;
 }

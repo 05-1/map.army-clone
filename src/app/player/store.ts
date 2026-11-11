@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { MAX_CHANGES, proposed, putChange, removeChange } from '../lib/submissions';
 import type { Change, CreatePayload, Feature, PlayerAllocation, PlayerState, SnapshotPayload } from '../lib/types';
-import { draftCost } from '../lib/tech';
+import { draftCost, withoutResearch } from '../lib/tech';
 import { saveDraft } from './client';
 
 export type PTool = 'select' | 'place' | 'buy' | 'text' | 'arrow' | 'line' | 'polygon';
@@ -109,7 +109,10 @@ export const usePlay = create<Play>()((set, get) => {
     },
     drop(featureId) {
       if (!get().editable()) return;
-      change(removeChange(get().draft, featureId));
+      const { draft, state } = get();
+      // Taking out a research also takes out what was bought from it this turn.
+      const research = draft.some((c) => c.op === 'research' && c.feature_id === featureId);
+      change(research && state ? withoutResearch(draft, featureId, state.economy.tech_unlocked, state.tech) : removeChange(draft, featureId));
       if (get().sel === featureId && !get().state?.features.some((f) => f.id === featureId)) set({ sel: null });
     },
     patchCreate(featureId, fn) {

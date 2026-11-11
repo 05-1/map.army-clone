@@ -59,12 +59,14 @@ That is the last time you need Supabase or GitHub to run a game.
 
 Players can buy their own reinforcements instead of you allocating them.
 
-- **Tech** (top bar) > **Tech tree**: add items. Each item has a tier (its column), a research cost (0 = available from the start), prerequisites, and, if players can buy it, a unit (NATO symbol or graphic) and a spawn cost. An item can also pay **income** (spawn and/or research points per turn for every unit of it on the map) and be a **spawn point** (bought units may be placed within its radius).
-- **Where bought units may go**, per item: near one of the player's own spawn-point units, inside a spawn zone, either, or anywhere.
-- **Tech > Spawn zones**: draw a polygon or circle, select it, then add it for one player, a team or everyone.
+- **Tech** (top bar) > **Tech tree** is a flowchart. "New item" or "New building" adds a box; drag boxes anywhere. Click a box and use its arrow buttons (→+ ↓+ ←+ ↑+) to add a new item in that direction that requires it. Drag one of a box's blue dots onto another box to make that one require it; select a box and click ✕ on an arrow to remove the link. − / + / Fit zoom, drag the background to pan.
+- Each item has a research cost (0 = available from the start), prerequisites, and, if players can buy it, a unit (NATO symbol or graphic) and a spawn cost. An item can also pay **income** (spawn and/or research points per turn for every unit of it on the map) and be a **spawn point** (bought units may be placed within its radius).
+- **Production buildings** ("New building", or the Kind switch on any item): players build them with spawn points at the cost you set, they cannot be moved once placed (untick "Players can move it once placed" to allow it), and units are placed within their radius. For a unit, "Produced at" limits it to certain buildings (a tank only at a Factory); tick nothing to allow any spawn point. A box grown from a building is a unit made there.
+- **Where bought units and buildings may go**, per item: near one of the player's own spawn points, inside a spawn zone, either, or anywhere.
+- **Tech > Spawn zones**: add a whole **country** (type its name), or click "Draw a zone on the map", draw a polygon or circle, and the window comes back to add it. Each zone is for one player, a team or everyone; rename or reassign it in the list. Zones show on your map as dotted outlines.
 - **Tech > Player points**: set each player's spawn and research points, hand out points to everyone or a team, and grant or remove research by hand.
 - To make a unit you placed yourself earn income or act as a spawn point, select it and pick its **Tech type** in the properties panel (it must also be assigned to a player).
-- Players research and buy inside their weekly draft. Nothing is charged until you push; a rejected purchase or research costs nothing. Research completes at the push, so a new unlock is usable from the next turn. Income is paid at each push, for the units each player owns after the turn's moves.
+- Players research and buy inside their weekly draft. Nothing is charged until you push; a rejected purchase or research costs nothing. A unit can be bought in the same draft that researches it; a new research still needs its prerequisites researched in an earlier turn. Rejecting a research in review also rejects what the draft buys from it. Income is paid at each push, for the units each player owns after the turn's moves.
 - Balances are stored with every turn, so a rollback restores them. Manual reinforcements (Turn > Reinforcements) still work alongside the tree.
 
 Everyone has a turn slider to step back through earlier turns. Under Manage > History and backup you can view any turn, roll back to one, and download or restore a backup.
@@ -125,10 +127,11 @@ Nothing in this table needs Supabase or GitHub. Each control calls a database fu
 | Accept or reject single changes, edit a draft, clear it, mark it ready for a player, note per player | Turn > Drafts > a player | `review_draft` |
 | Push | Turn > Push turn | `push_turn` |
 | **Tech tree and points** | | |
-| Add, edit, delete tech items (costs, prerequisites, unit, income, spawn radius, placement) | Tech > Tech tree | `save_tech_item`, `delete_tech_item`, `get_economy` |
+| Add, edit, delete tech items and buildings (costs, prerequisites, unit, income, spawn radius, placement, producing buildings, movable) | Tech > Tech tree | `save_tech_item`, `delete_tech_item`, `get_economy` |
+| Arrange the flowchart | Tech > Tech tree: drag boxes | `move_tech_items` |
 | Spawn and research points per player, hand out points | Tech > Player points | `set_player_points` |
 | Grant or remove research for a player | Tech > Player points > Researched | `set_player_tech` |
-| Spawn zones per player, team or everyone | Tech > Spawn zones | `save_spawn_zone`, `delete_spawn_zone` |
+| Spawn zones (countries or drawn shapes) per player, team or everyone | Tech > Spawn zones | `save_spawn_zone`, `delete_spawn_zone` |
 | Tech type of a unit already on the map | Select on map > properties > Tech type | map edit (row level security) |
 | **History** | | |
 | View any past turn, unfiltered | Turn slider (bottom right), or Manage > History > View | `get_snapshot` |
@@ -203,6 +206,8 @@ Both basemaps are free and need no key. Fine for a private game; check the terms
 | --- | --- | --- |
 | Satellite | Esri World Imagery | Attribution required. Esri expects an ArcGIS account for production apps |
 | Topo | OpenTopoMap | CC-BY-SA, volunteer-run, max zoom 17, no bulk downloading |
+
+Country borders for spawn zones: Natural Earth 1:50m (public domain) via the world-atlas package (ISC), in `countries.json`. Borders are simplified and follow Natural Earth's de facto boundaries; disputed areas may not match what your players expect.
 
 Libraries: MapLibre GL JS (BSD-3), milsymbol (MIT), Turf (MIT), DOMPurify (Apache-2.0/MPL-2.0), supabase-js (MIT), zustand (MIT), React (MIT).
 

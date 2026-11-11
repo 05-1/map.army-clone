@@ -17,7 +17,7 @@ import { PlayersDialog } from './PlayersDialog';
 import { PropertiesPanel, StylePanel } from './PropertiesPanel';
 import { ReviewOverlay } from './reviewOverlay';
 import { ShareDialog } from './ShareDialog';
-import { TechDialog } from './TechDialog';
+import { TechDialog, type TechTab } from './TechDialog';
 import { TurnPanel } from './TurnPanel';
 import { useEd, type Tool } from './store';
 import { Icon, IconButton, Section } from './ui';
@@ -94,7 +94,24 @@ function Workspace({ backend, who, meta, maps, setMaps, onSignOut, onSwitch, onP
   const [sharing, setSharing] = useState(false);
   const [managingPlayers, setManagingPlayers] = useState(false);
   const [admin, setAdmin] = useState<AdminTab | null>(null);
-  const [teching, setTeching] = useState(false);
+  const [teching, setTeching] = useState<TechTab | null>(null);
+  const zoneDraw = useEd((s) => s.zoneDraw);
+
+  // "Draw a zone on the map": once a polygon or circle is selected, go back to the Tech window.
+  useEffect(() => useEd.subscribe((s, p) => {
+    if (!s.zoneDraw || s.selection === p.selection || s.selection.length !== 1) return;
+    const f = s.features.find((x) => x.id === s.selection[0]);
+    if (f && (f.kind === 'polygon' || (f.kind === 'circle' && f.props.radius))) {
+      useEd.setState({ zoneDraw: false, tool: 'select' });
+      setTeching('zones');
+    }
+  }), []);
+  // Esc with nothing being drawn gives up on the zone.
+  useEffect(() => {
+    const esc = (e: KeyboardEvent) => e.key === 'Escape' && useEd.getState().zoneDraw && useEd.getState().tool === 'select' && useEd.setState({ zoneDraw: false });
+    window.addEventListener('keydown', esc, true);
+    return () => window.removeEventListener('keydown', esc, true);
+  }, []);
 
   const tool = useEd((s) => s.tool);
   const snap = useEd((s) => s.snap);
@@ -285,7 +302,7 @@ function Workspace({ backend, who, meta, maps, setMaps, onSignOut, onSwitch, onP
           Set start view
         </button>
         <button type="button" className="btn" onClick={() => setManagingPlayers(true)}>Players</button>
-        <button type="button" className="btn" title="Tech tree, player points and spawn zones" onClick={() => setTeching(true)}>Tech</button>
+        <button type="button" className="btn" title="Tech tree, player points and spawn zones" onClick={() => (useEd.setState({ zoneDraw: false }), setTeching('tree'))}>Tech</button>
         <button
           type="button"
           className={`btn${turnOpen ? ' on' : ''}`}
@@ -313,6 +330,8 @@ function Workspace({ backend, who, meta, maps, setMaps, onSignOut, onSwitch, onP
         {failed && <div className="splash over">Could not load this map: {failed}</div>}
         {viewing ? (
           <div className="banner" role="status">Viewing {turnLabel({ number: viewing.viewing, label: null, at: '' }).toLowerCase()}, complete and read-only. Use the slider below to return to the live map.</div>
+        ) : zoneDraw ? (
+          <div className="banner" role="status">Drawing a spawn zone: polygon (click points, double-click to finish) or circle (C). The Tech window comes back when it is done.</div>
         ) : reviewing ? (
           <div className="banner" role="status">Editing {reviewing.name}'s draft ({pendingEdits} changes). Drag their ghosts; the live map is locked until you click "Done editing".</div>
         ) : null}
@@ -342,7 +361,7 @@ function Workspace({ backend, who, meta, maps, setMaps, onSignOut, onSwitch, onP
       </footer>
 
       {sharing && <ShareDialog backend={backend} map={meta} flush={() => flushRef.current()} onClose={() => setSharing(false)} />}
-      {teching && <TechDialog backend={backend} map={meta} refresh={refreshTurn} onClose={() => setTeching(false)} />}
+      {teching && <TechDialog backend={backend} map={meta} tab={teching} refresh={refreshTurn} onClose={() => setTeching(null)} />}
       {managingPlayers && <PlayersDialog backend={backend} map={meta} settle={settle} onClose={() => setManagingPlayers(false)} />}
       {admin && (
         <AdminDialog

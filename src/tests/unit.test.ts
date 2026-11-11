@@ -91,3 +91,40 @@ describe('basemaps', () => {
     expect(asBasemap(undefined)).toBe('satellite');
   });
 });
+
+describe('tech tree helpers', () => {
+  it('zones: countries with several parts and holes', async () => {
+    const { inZone } = await import('../app/lib/submissions');
+    const sq = (x: number, y: number, d: number): [number, number][] => [[x, y], [x + d, y], [x + d, y + d], [x, y + d], [x, y]];
+    const z = { type: 'MultiPolygon' as const, coordinates: [[sq(0, 0, 2), sq(0.8, 0.8, 0.4)], [sq(10, 0, 1)]] };
+    expect(inZone(z, [0.5, 0.5])).toBe(true);
+    expect(inZone(z, [1, 1])).toBe(false);      // lake
+    expect(inZone(z, [10.5, 0.5])).toBe(true);  // second island
+    expect(inZone(z, [5, 0.5])).toBe(false);
+  });
+
+  it('same-turn research: cancelling it drops its purchases; rejecting it in review rejects them too', async () => {
+    const { toggleRejected, withoutResearch, usable } = await import('../app/lib/tech');
+    const it = { id: 'heli', research_cost: 5 } as never;
+    const draft = [
+      { op: 'research' as const, feature_id: 'heli' },
+      { op: 'create' as const, feature_id: 'u1', payload: { kind: 'symbol' as const, geometry: { type: 'Point' as const, coordinates: [0, 0] }, purchase_id: 'heli' } },
+      { op: 'create' as const, feature_id: 'u2', payload: { kind: 'symbol' as const, geometry: { type: 'Point' as const, coordinates: [0, 0] }, purchase_id: 'other' } },
+    ];
+    expect(usable(it, [], draft)).toBe(true);
+    expect(usable(it, [], [])).toBe(false);
+    expect(withoutResearch(draft, 'heli', [], [it]).map((c) => c.feature_id)).toEqual(['u2']);
+    expect(withoutResearch(draft, 'heli', ['heli'], [it]).map((c) => c.feature_id)).toEqual(['u1', 'u2']);
+    expect(toggleRejected(draft, [], 'heli').sort()).toEqual(['heli', 'u1']);
+    expect(toggleRejected(draft, ['heli', 'u1'], 'u1')).toEqual([]);
+  });
+
+  it('flowchart layout: saved positions win, the rest by tier', async () => {
+    const { layout } = await import('../app/lib/TechTree');
+    const mk = (id: string, tier: number, pos: [number, number] | null) => ({ id, name: id, tier, sort: 0, pos_x: pos?.[0] ?? null, pos_y: pos?.[1] ?? null }) as never;
+    const at = layout([mk('a', 0, null), mk('b', 0, null), mk('c', 2, [500, -40])]);
+    expect(at.get('a')).toEqual({ x: 0, y: 0 });
+    expect(at.get('b')).toEqual({ x: 0, y: 190 });
+    expect(at.get('c')).toEqual({ x: 500, y: -40 });
+  });
+});

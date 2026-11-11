@@ -10,7 +10,7 @@ import { symbolDataUrl } from '../lib/images';
 import { createMap } from '../lib/mapview';
 import { cleanHeading, describeChange, dropPart, fmtWhen, MAX_ORDER_LEN, summarize } from '../lib/submissions';
 import { publicAssetUrl } from '../lib/supabase';
-import { costText, fmtPts, isUnlocked, placementText, techStatus } from '../lib/tech';
+import { costText, fmtPts, isUnlocked, techStatus, usable, whereText, withoutResearch } from '../lib/tech';
 import { TechTree } from '../lib/TechTree';
 import { TurnSlider, turnLabel } from '../lib/TurnSlider';
 import type { BasemapId, Feature, PlayerAllocation, Pos, TechItem, Zone } from '../lib/types';
@@ -344,10 +344,9 @@ function TechBox({ openTree }: { openTree(): void }) {
   const buyId = usePlay((s) => s.buyId);
   const { economy, tech } = state;
   if (!tech.length && !economy.spawn_points && !economy.research_points) return null;
-  void draft; // re-render when the draft (and so the points left) changes
   const left = pointsLeft();
   const editable = !!state.turn && !state.turn.frozen;
-  const buyable = tech.filter((it) => it.buyable && isUnlocked(it, economy.tech_unlocked));
+  const buyable = tech.filter((it) => it.buyable && usable(it, economy.tech_unlocked, draft));
   const picked = tech.find((x) => x.id === buyId);
 
   return (
@@ -361,18 +360,25 @@ function TechBox({ openTree }: { openTree(): void }) {
       <button type="button" className="btn" onClick={openTree}>Tech tree{tech.length ? ` (${tech.filter((x) => isUnlocked(x, economy.tech_unlocked)).length}/${tech.length} unlocked)` : ''}</button>
       {editable && buyable.length > 0 && (
         <>
-          <h4>Buy</h4>
-          <ul className="allocs">
-            {buyable.map((it) => (
-              <li key={it.id}>
-                <button type="button" className={`btn${tool === 'buy' && buyId === it.id ? ' on' : ''}`} disabled={left.spawn < it.spawn_cost} onClick={() => usePlay.getState().startBuy(it.id)}>
-                  {techIcon(it) ? <img className="mini" src={techIcon(it)!} alt="" /> : null}
-                  <span><strong>{it.name}</strong><small>{costText(it, 'buy')} · {placementText(it.placement)}</small></span>
-                </button>
-              </li>
-            ))}
-          </ul>
-          {tool === 'buy' && picked && <p className="tip">Click the map to place {picked.name} {placementText(picked.placement)}{picked.placement !== 'anywhere' ? ' (dashed outlines)' : ''}. Esc stops.</p>}
+          {([['building', 'Build'], ['unit', 'Recruit']] as const).map(([cat, title]) => {
+            const list = buyable.filter((it) => it.category === cat);
+            return list.length > 0 && (
+              <div key={cat}>
+                <h4>{title}</h4>
+                <ul className="allocs">
+                  {list.map((it) => (
+                    <li key={it.id}>
+                      <button type="button" className={`btn${tool === 'buy' && buyId === it.id ? ' on' : ''}`} disabled={left.spawn < it.spawn_cost} onClick={() => usePlay.getState().startBuy(it.id)}>
+                        {techIcon(it) ? <img className="mini" src={techIcon(it)!} alt="" /> : null}
+                        <span><strong>{it.name}</strong><small>{costText(it, 'buy')} · {whereText(it, tech)}{!it.can_move ? ' · cannot move' : ''}</small></span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            );
+          })}
+          {tool === 'buy' && picked && <p className="tip">Click the map to place {picked.name} {whereText(picked, tech)}{picked.placement !== 'anywhere' ? ' (dashed outlines)' : ''}. Esc stops.</p>}
           {buyable.some((it) => it.placement !== 'anywhere') && !state.spawn_zones.length && !state.spawn_points.length && (
             <p className="note">You have no spawn zone or spawn-point unit yet, so only units placeable anywhere can be bought.</p>
           )}
@@ -405,7 +411,19 @@ function TechModal({ onClose }: { onClose(): void }) {
       return <button type="button" className="btn sm primary" disabled={left.research < it.research_cost} onClick={(e) => (stop(e), usePlay.getState().put({ op: 'research', feature_id: it.id }))}>Research ({it.research_cost})</button>;
     }
     if (st === 'researching') {
-      return <button type="button" className="btn sm" onClick={(e) => (stop(e), usePlay.getState().drop(it.id))}>Cancel research</button>;
+      const bought = draft.filter((c) => c.op === 'create' && c.payload.purchase_id === it.id).length;
+      return (
+        <div className="acts">
+          {it.buyable && <button type="button" className="btn sm" disabled={left.spawn < it.spawn_cost} onClick={(e) => (stop(e), usePlay.getState().startBuy(it.id), onClose())}>Buy and place</button>}
+          <button
+            type="button" className="btn sm"
+            title={bought ? `Also takes the ${bought} unit${bought === 1 ? '' : 's'} bought from it out of the draft` : undefined}
+            onClick={(e) => (stop(e), usePlay.getState().setDraft(withoutResearch(draft, it.id, economy.tech_unlocked, tech)))}
+          >
+            Cancel research
+          </button>
+        </div>
+      );
     }
     if (st === 'unlocked' && it.buyable) {
       return <button type="button" className="btn sm" disabled={left.spawn < it.spawn_cost} onClick={(e) => (stop(e), usePlay.getState().startBuy(it.id), onClose())}>Buy and place</button>;
@@ -425,18 +443,18 @@ function TechModal({ onClose }: { onClose(): void }) {
           <span>Research <b>{fmtPts(left.research)}</b></span>
           <span>Income +{fmtPts(economy.income.spawn)} / +{fmtPts(economy.income.research)} per turn</span>
         </p>
-        <TechTree items={tech} icon={techIcon} status={status} selected={sel} onPick={(it) => setSel(it.id)} footer={footer} />
+        <TechTree items={tech} icon={techIcon} status={status} selected={sel} onPick={(it) => setSel(it?.id ?? null)} footer={footer} />
         {picked && (
           <div className="quote">
             <strong>{picked.name}</strong>
             {picked.description ? `\n${picked.description}` : ''}
             {picked.prereqs.length ? `\nRequires: ${picked.prereqs.map((id) => tech.find((x) => x.id === id)?.name ?? '?').join(', ')}` : ''}
-            {picked.buyable ? `\nPlaced ${placementText(picked.placement)}.` : '\nResearch only: unlocks what comes after it.'}
+            {picked.buyable ? `\n${picked.category === 'building' ? 'Built' : 'Placed'} ${whereText(picked, tech)}.${picked.can_move ? '' : ' Cannot move once placed.'}` : '\nResearch only: unlocks what comes after it.'}
           </div>
         )}
         <p className="tip">
           {editable
-            ? 'Research is added to your draft and completes when the owner pushes the turn, so a new unlock can be used from the next turn. Purchases are placed on the map like any unit.'
+            ? 'Research is added to your draft and paid for when the owner pushes the turn. You can buy and place a researched unit straight away, in the same draft. A new research needs its prerequisites researched in an earlier turn.'
             : 'The turn is not open for orders, so nothing can be researched or bought right now.'}
         </p>
       </div>

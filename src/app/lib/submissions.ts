@@ -1,8 +1,8 @@
 // Pure logic for player turns: building a draft, describing changes, and turning a set of proposed
 // changes into "ghost" features for the overlay. Shared by the player page and the owner's review panel.
 // Nothing here is a security boundary; the database re-validates every change on submit and on approval.
-import type { Polygon } from 'geojson';
-import { bearing, circlePoly, coordsOf, destinationPt, distanceM, norm360 } from './geo';
+import type { MultiPolygon, Polygon } from 'geojson';
+import { bearing, circlePoly, coordsOf, destinationPt, distanceM, fmtDist, norm360 } from './geo';
 import { DEFAULT_STYLE, type Change, type Draft, type Feature, type Kind, type Pos, type TechItem, type UpdatePayload, type Zone } from './types';
 
 export const GHOST_LAYER = 'ghost';
@@ -186,10 +186,7 @@ export function clampToRadius(origin: Pos, target: Pos, radiusM: number | null |
   return distanceM(origin, target) <= radiusM ? target : destinationPt(origin, radiusM * 0.999, bearing(origin, target));
 }
 
-export function inZone(zone: Zone, p: Pos): boolean {
-  if (!zone) return true;
-  if ('center' in zone) return distanceM(zone.center, p) <= zone.radius_m;
-  const ring = zone.coordinates[0] as Pos[];
+function inRing(ring: Pos[], p: Pos): boolean {
   let inside = false;
   for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
     const [xi, yi] = ring[i];
@@ -198,8 +195,24 @@ export function inZone(zone: Zone, p: Pos): boolean {
   }
   return inside;
 }
+/** Inside the outer ring and not in a hole. Mirrors private.in_polygon(). */
+const inPolygon = (rings: Pos[][], p: Pos) => inRing(rings[0], p) && !rings.slice(1).some((r) => inRing(r, p));
 
-export const zonePolygon = (zone: Exclude<Zone, null>): Polygon => ('center' in zone ? circlePoly(zone.center, zone.radius_m) : zone);
+export function inZone(zone: Zone, p: Pos): boolean {
+  if (!zone) return true;
+  if ('center' in zone) return distanceM(zone.center, p) <= zone.radius_m;
+  if (zone.type === 'MultiPolygon') return zone.coordinates.some((poly) => inPolygon(poly as Pos[][], p));
+  return inPolygon(zone.coordinates as Pos[][], p);
+}
+
+/** A zone as one GeoJSON geometry for drawing. */
+export const zoneGeometry = (zone: Exclude<Zone, null>): Polygon | MultiPolygon => ('center' in zone ? circlePoly(zone.center, zone.radius_m) : zone);
+
+/** A zone as separate polygons (a country has many parts). */
+export const zoneParts = (zone: Exclude<Zone, null>): Polygon[] =>
+  'center' in zone ? [circlePoly(zone.center, zone.radius_m)] : zone.type === 'MultiPolygon' ? zone.coordinates.map((coordinates) => ({ type: 'Polygon', coordinates })) : [zone];
+
+export const zoneText = (z: Zone) => (!z ? 'anywhere' : 'center' in z ? `within ${fmtDist(z.radius_m)} of a point` : z.type === 'MultiPolygon' ? 'inside a country' : 'inside a drawn area');
 
 /** A zone from a shape drawn in the editor: a polygon as is, a circle as centre + radius. */
 export function zoneFromFeature(f: Feature): Zone {

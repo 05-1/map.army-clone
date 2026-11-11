@@ -5,7 +5,7 @@
 import type { Map as MlMap, MapMouseEvent } from 'maplibre-gl';
 import { toMerc, translateGeom } from '../lib/geo';
 import { hitLayers, SceneRenderer } from '../lib/scene';
-import { baseId, effectiveChanges, findConflicts, ghostFeatures, GHOST_LAYER, GHOST_LAYERS, putChange, zonePolygon } from '../lib/submissions';
+import { baseId, effectiveChanges, findConflicts, ghostFeatures, GHOST_LAYER, GHOST_LAYERS, putChange, zoneParts } from '../lib/submissions';
 import { DEFAULT_STYLE, type Asset, type Change, type Feature, type Pos } from '../lib/types';
 import { useEd } from './store';
 
@@ -42,21 +42,23 @@ export class ReviewOverlay {
     const s = useEd.getState();
     const assets = new Map(s.assets.map((a) => [a.id, a]));
     const b = s.bundle;
-    if (!b?.turn || !s.showDrafts || s.viewing) return this.renderer.update(GHOST_LAYERS, [], assets);
+    if (!b || s.viewing) return this.renderer.update(GHOST_LAYERS, [], assets);
 
     const out: Feature[] = [];
     const extra = (id: string, kind: Feature['kind'], geometry: Feature['geometry'], props: Feature['props'], style: Partial<Feature['style']>) =>
       out.push({ id, layer_id: GHOST_LAYER, kind, geometry, props, style: { ...DEFAULT_STYLE, ...style }, asset_id: null, z: out.length });
     const colorOf = (playerId: string | null) => s.players.find((p) => p.id === playerId)?.color ?? DEFAULT_COLOR;
 
+    // Spawn zones are always shown to the owner (dotted), whether or not a turn is running.
     for (const z of b.economy?.zones ?? []) {
       const color = z.player_id ? colorOf(z.player_id) : z.team ? s.players.find((p) => p.team === z.team)?.color ?? DEFAULT_COLOR : '#ffffff';
-      extra(`spawn~${z.id}`, 'polygon', zonePolygon(z.zone), { name: z.name ?? 'Spawn zone' }, { color, width: 1.5, dash: 'dot', fillOpacity: 0.04 });
+      zoneParts(z.zone).forEach((g, i) => extra(`spawn~${z.id}~${i}`, 'polygon', g, {}, { color, width: 1.5, dash: 'dot', fillOpacity: 0.05 }));
     }
+    if (!b.turn || !s.showDrafts) return this.renderer.update(GHOST_LAYERS, out, assets);
     for (const a of b.allocations) {
       if (!a.zone) continue;
       const color = a.player_id ? colorOf(a.player_id) : s.players.find((p) => p.team === a.team)?.color ?? DEFAULT_COLOR;
-      extra(`zone~${a.id}`, 'polygon', zonePolygon(a.zone), {}, { color, width: 1.5, dash: 'dash', fillOpacity: 0.06 });
+      zoneParts(a.zone).forEach((g, i) => extra(`zone~${a.id}~${i}`, 'polygon', g, {}, { color, width: 1.5, dash: 'dash', fillOpacity: 0.06 }));
     }
     const accepted = b.drafts.map((d) => ({ player_id: d.player_id, changes: effectiveChanges(d) }));
     for (const d of accepted) {

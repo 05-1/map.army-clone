@@ -7,10 +7,10 @@ import type { Feature as GjFeature } from 'geojson';
 import type { GeoJSONSource, LayerSpecification, Map as MlMap, MapMouseEvent } from 'maplibre-gl';
 import { circlePoly, fromMerc, toMerc, translateGeom } from '../lib/geo';
 import { hitLayers, SceneRenderer } from '../lib/scene';
-import { anchorOf, baseId, clampToRadius, ghostFeatures, GHOST_LAYERS, inZone, zonePolygon } from '../lib/submissions';
+import { anchorOf, baseId, clampToRadius, ghostFeatures, GHOST_LAYERS, inZone, zoneGeometry } from '../lib/submissions';
 import { publicAssetUrl } from '../lib/supabase';
 import type { Asset, CreatePayload, Feature, Pos } from '../lib/types';
-import { canPlace, isUnlocked, placementText } from '../lib/tech';
+import { canPlace, sourcesFor, usable, whereText } from '../lib/tech';
 import { effective, pointsLeft, remaining, usePlay, type PTool } from './store';
 
 const S = () => usePlay.getState();
@@ -102,12 +102,12 @@ export class PlayController {
         if (r != null && r > 0 && state.turn) add(circlePoly(anchorOf(f.geometry), r), f.id === sel ? 'range-sel' : 'range');
       }
       const alloc = tool === 'place' ? state.allocations.find((a) => a.id === allocId) : e?.change?.op === 'create' ? state.allocations.find((a) => a.id === (e.change as { payload: CreatePayload }).payload.allocation_id) : undefined;
-      if (alloc?.zone) add(zonePolygon(alloc.zone), 'zone');
+      if (alloc?.zone) add(zoneGeometry(alloc.zone), 'zone');
       // Where a purchase may go: spawn zones and the circles around this player's spawn-point units.
       const buyItem = state.tech.find((x) => x.id === (tool === 'buy' ? buyId : e?.change?.op === 'create' ? (e.change as { payload: CreatePayload }).payload.purchase_id : null));
       if (buyItem && buyItem.placement !== 'anywhere') {
-        if (buyItem.placement !== 'spawn') for (const z of state.spawn_zones) add(zonePolygon(z.zone), 'zone');
-        if (buyItem.placement !== 'zone') for (const sp of state.spawn_points) add(circlePoly(sp.center, sp.radius_m), 'zone');
+        if (buyItem.placement !== 'spawn') for (const z of state.spawn_zones) add(zoneGeometry(z.zone), 'zone');
+        if (buyItem.placement !== 'zone') for (const sp of sourcesFor(buyItem, state.spawn_points)) add(circlePoly(sp.center, sp.radius_m), 'zone');
       }
     }
     if (e) add(e.f.geometry, e.f.geometry.type === 'Point' ? 'selpt' : 'sel');
@@ -158,9 +158,9 @@ export class PlayController {
     const st = s.state;
     const it = st?.tech.find((x) => x.id === s.buyId);
     if (!st || !it) return s.say('Pick something to buy first');
-    if (!isUnlocked(it, st.economy.tech_unlocked)) return s.say(`${it.name} is not researched yet`);
+    if (!usable(it, st.economy.tech_unlocked, s.draft)) return s.say(`${it.name} is not researched yet`);
     if (pointsLeft().spawn < it.spawn_cost) return s.say(`Not enough spawn points for ${it.name}`);
-    if (!canPlace(it, at, st.spawn_zones, st.spawn_points)) return s.say(`${it.name} must be placed ${placementText(it.placement)} (dashed outlines)`);
+    if (!canPlace(it, at, st.spawn_zones, st.spawn_points)) return s.say(`${it.name} must be placed ${whereText(it, st.tech)} (dashed outlines)`);
     const geometry: Feature['geometry'] = { type: 'Point', coordinates: at };
     const props = { ...it.props, name: it.props.name || it.name };
     if (it.asset_id) this.create({ kind: 'asset', geometry, asset_id: it.asset_id, purchase_id: it.id, props });

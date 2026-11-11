@@ -141,7 +141,7 @@ describe('tech tree', () => {
     expect(depot).toMatchObject({ owner_player_id: id.p1, kind: 'symbol' });
     expect(depot.props.tech).toBe(id.depot);
     expect((await state(A1, id.p1)).economy.income).toEqual({ spawn: 10, research: 4 });
-    expect((await state(A1, id.p1)).spawn_points).toEqual([{ feature_id: id.depotBuy, center: [10, 50.005], radius_m: 5000, name: 'Depot' }]);
+    expect((await state(A1, id.p1)).spawn_points).toEqual([{ feature_id: id.depotBuy, center: [10, 50.005], radius_m: 5000, name: 'Depot', item_id: id.depot }]);
   });
 
   it('a spawn unit lets its owner place nearby; rejected purchases cost nothing', async () => {
@@ -203,5 +203,73 @@ describe('tech tree', () => {
     const eco = await rpc(OWNER, 'get_economy', id.map);
     expect(eco.items.find((x: Row) => x.id === id.adv).prereqs).toEqual([]);
     expect(eco.players.find((x: Row) => x.id === id.p1).tech_unlocked).toEqual([]);
+  });
+
+  it('a unit can be bought the same turn its research is done; rejecting the research alone fails the push', async () => {
+    for (const [pl, uid] of [[id.p1, A1], [id.p2, A2]]) {
+      const t = (await q('select invite_token from public.players where id = $1', [pl]))[0].invite_token;
+      expect((await rpc(uid, 'claim_invite', t, null)).ok).toBe(true);
+    }
+    id.heli = await item({ name: 'Helicopter', research_cost: 5, spawn_cost: 5, sidc: 'SFAPMHA----F---', placement: 'anywhere' });
+    await rpc(OWNER, 'set_player_points', id.p1, 100, 100);
+    await expect(save(A1, id.p1, [buy(id.heli, 0, 0)])).rejects.toThrow(/not researched/);
+    const r = research(id.heli);
+    const h = buy(id.heli, 0, 0);
+    expect((await save(A1, id.p1, [r, h])).count).toBe(2);
+    const t = await turn();
+    await rpc(OWNER, 'lock_turn', t.id);
+    await rpc(OWNER, 'review_draft', t.id, id.p1, J({ ready: true, rejected: [id.heli] }));
+    await expect(rpc(OWNER, 'push_turn', t.id)).rejects.toThrow(/Alice: Helicopter is not researched yet/);
+    await rpc(OWNER, 'review_draft', t.id, id.p1, J({ rejected: [] }));
+    await rpc(OWNER, 'push_turn', t.id);
+    const a = await player(id.p1);
+    expect(a.tech_unlocked).toContain(id.heli);
+    expect((await q('select count(*)::int n from public.features where id = $1', [h.feature_id]))[0].n).toBe(1);
+  });
+
+  it('countries work as spawn zones: several parts, holes excluded', async () => {
+    const sq = (x: number, y: number, d: number) => [[x, y], [x + d, y], [x + d, y + d], [x, y + d], [x, y]];
+    // Two islands; the first has a lake in the middle.
+    const country = { type: 'MultiPolygon', coordinates: [[sq(40, 40, 2), sq(40.8, 40.8, 0.4)], [sq(50, 40, 1)]] };
+    id.inland = await item({ name: 'Marines', spawn_cost: 1, sidc: 'SFGPUCI----F---', placement: 'zone' });
+    await rpc(OWNER, 'save_spawn_zone', id.map, J({ name: 'Atlantis', player_id: id.p1, zone: country }));
+    await expect(rpc(OWNER, 'save_spawn_zone', id.map, J({ zone: { type: 'MultiPolygon', coordinates: [[[[0, 0], [1, 1]]]] } }))).rejects.toThrow(/invalid spawn zone/);
+    await expect(save(A1, id.p1, [buy(id.inland, 41, 41)])).rejects.toThrow(/spawn zone/);     // in the lake
+    await expect(save(A1, id.p1, [buy(id.inland, 45, 41)])).rejects.toThrow(/spawn zone/);     // at sea
+    expect((await save(A1, id.p1, [buy(id.inland, 40.5, 40.5), buy(id.inland, 50.5, 40.5)])).count).toBe(2);
+    expect((await state(A1, id.p1)).spawn_zones.find((z: Row) => z.name === 'Atlantis').zone.type).toBe('MultiPolygon');
+    await save(A1, id.p1, []);
+  });
+
+  it('flowchart positions are saved by the owner only', async () => {
+    expect(await rpc(OWNER, 'move_tech_items', id.map, J([{ id: id.heli, x: 120, y: -80 }, { id: uuid(), x: 1, y: 1 }]))).toBe(1);
+    await expect(rpc(A1, 'move_tech_items', id.map, J([{ id: id.heli, x: 0, y: 0 }]))).rejects.toThrow(/not authorised/);
+    const it = (await rpc(OWNER, 'get_economy', id.map)).items.find((x: Row) => x.id === id.heli);
+    expect([it.pos_x, it.pos_y]).toEqual([120, -80]);
+    // Saving the item's other fields without a position keeps it.
+    await item({ id: id.heli, name: 'Helicopter', research_cost: 5, spawn_cost: 6, sidc: 'SFAPMHA----F---', placement: 'anywhere' });
+    expect((await rpc(OWNER, 'get_economy', id.map)).items.find((x: Row) => x.id === id.heli).pos_x).toBe(120);
+  });
+
+  it('production buildings: players build them, they cannot move, and units come only from the right building', async () => {
+    await rpc(OWNER, 'set_player_points', id.p1, 1000, 0);
+    id.barracks = await item({ name: 'Barracks', category: 'building', can_move: false, spawn_cost: 40, sidc: 'SFGPIB-----H---', spawn_radius_m: 3000, placement: 'anywhere' });
+    id.rifle = await item({ name: 'Rifles', spawn_cost: 5, sidc: 'SFGPUCI----F---', placement: 'spawn', spawn_from: [id.barracks] });
+    await expect(item({ name: 'Bad', sidc: 'SFGPUCI----F---', spawn_from: [uuid()] })).rejects.toThrow(/producing building/);
+    // Build barracks far from everything, push, then recruit next to it (not next to the old depot).
+    const b = buy(id.barracks, 60, 10);
+    await save(A1, id.p1, [b]);
+    await push();
+    expect((await player(id.p1)).spawn_points).toBe(1000 - 40 + 10);           // + depot income
+    const depot = (await q('select geometry from public.features where id = $1', [id.depotBuy]))[0].geometry.coordinates;
+    await expect(save(A1, id.p1, [buy(id.rifle, depot[0], depot[1] + 0.001)])).rejects.toThrow(/spawn point/);
+    expect((await save(A1, id.p1, [buy(id.rifle, 60, 10.01)])).count).toBe(1);
+    // The building stays where it was built.
+    await expect(save(A1, id.p1, [{ op: 'update', feature_id: b.feature_id, payload: { geometry: pt(60, 10.001) } }])).rejects.toThrow(/cannot be moved/);
+    expect((await state(A1, id.p1)).radii[b.feature_id]).toBe(0);
+    await save(A1, id.p1, []);
+    // Deleting the building item clears it from what produces Rifles.
+    await rpc(OWNER, 'delete_tech_item', id.barracks);
+    expect((await rpc(OWNER, 'get_economy', id.map)).items.find((x: Row) => x.id === id.rifle).spawn_from).toEqual([]);
   });
 });

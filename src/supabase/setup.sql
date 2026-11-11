@@ -39,6 +39,7 @@ begin
               'get_settings','set_discord_webhook','test_discord_webhook',
               'claim_invite','get_player_state','get_player_history','save_draft','set_ready',
               'get_economy','save_tech_item','delete_tech_item','save_spawn_zone','delete_spawn_zone','set_player_points','set_player_tech',
+              'move_tech_items',
               'submit_turn','withdraw_submission','review_submission']) loop
     execute 'drop function ' || r.sig || ' cascade';
   end loop;
@@ -284,11 +285,22 @@ create table if not exists public.tech_items (
   income_research integer not null default 0 check (income_research between 0 and 1000000),
   spawn_radius_m  double precision check (spawn_radius_m is null or spawn_radius_m > 0),  -- set = this unit is a spawn point
   placement       text not null default 'either' check (placement in ('spawn', 'zone', 'either', 'anywhere')),
+  pos_x           double precision,                                               -- place in the flowchart (null = by tier)
+  pos_y           double precision,
+  category        text not null default 'unit' check (category in ('unit', 'building')),  -- a building usually produces units
+  can_move        boolean not null default true,                                  -- false: players cannot move it once placed
+  spawn_from      uuid[] not null default '{}',                                   -- buildings that produce this unit (empty = any spawn point)
   created_at      timestamptz not null default now(),
   check (asset_id is null or sidc is null),
   check (not buyable or asset_id is not null or sidc is not null)
 );
 create index if not exists tech_items_map_idx on public.tech_items (map_id);
+alter table public.tech_items
+  add column if not exists pos_x double precision,
+  add column if not exists pos_y double precision,
+  add column if not exists category text not null default 'unit' check (category in ('unit', 'building')),
+  add column if not exists can_move boolean not null default true,
+  add column if not exists spawn_from uuid[] not null default '{}';
 
 -- Areas where bought units may be placed: for one player, a team, or (both null) everyone on the map.
 create table if not exists public.spawn_zones (
@@ -639,14 +651,29 @@ begin
   return inside;
 end $$;
 
+-- A zone: null (anywhere), {"center": [lng, lat], "radius_m": n}, a GeoJSON Polygon, or a MultiPolygon
+-- (a country: up to 1000 parts, 4 MB).
 create function private.valid_zone(z jsonb) returns boolean
 language sql immutable set search_path = ''
 as $$
   select z is null or z = 'null'::jsonb or coalesce(case
     when jsonb_typeof(z) <> 'object' then false
     when z ? 'center' then private.valid_pos(z -> 'center') and z ? 'radius_m' and private.num_in(z -> 'radius_m', 1, 20000000)
+    when z ->> 'type' = 'MultiPolygon' then
+      jsonb_typeof(z -> 'coordinates') = 'array' and jsonb_array_length(z -> 'coordinates') between 1 and 1000
+      and octet_length(z::text) < 4000000
+      and not exists (select 1 from jsonb_array_elements(z -> 'coordinates') poly
+                      where not private.valid_geom(jsonb_build_object('type', 'Polygon', 'coordinates', poly), 'Polygon'))
     else private.valid_geom(z, 'Polygon')
   end, false);
+$$;
+
+-- Inside the outer ring and not in a hole.
+create function private.in_polygon(rings jsonb, p float8[]) returns boolean
+language sql immutable set search_path = ''
+as $$
+  select private.in_ring(rings -> 0, p)
+     and not exists (select 1 from jsonb_array_elements(rings) with ordinality r (ring, i) where r.i > 1 and private.in_ring(r.ring, p));
 $$;
 
 create function private.in_zone(z jsonb, p float8[]) returns boolean
@@ -655,7 +682,8 @@ as $$
   select case
     when z is null or z = 'null'::jsonb then true
     when z ? 'center' then private.dist_m(array[(z -> 'center' ->> 0)::float8, (z -> 'center' ->> 1)::float8], p) <= (z ->> 'radius_m')::float8 * 1.001 + 1
-    else private.in_ring(z -> 'coordinates' -> 0, p)
+    when z ->> 'type' = 'MultiPolygon' then exists (select 1 from jsonb_array_elements(z -> 'coordinates') poly where private.in_polygon(poly, p))
+    else private.in_polygon(z -> 'coordinates', p)
   end;
 $$;
 
@@ -697,6 +725,7 @@ as $$
     select exists (
       select 1 from public.features f join public.tech_items s on s.id::text = f.props ->> 'tech' and s.map_id = f.map_id
       where f.map_id = p.map_id and f.owner_player_id = p.id and s.spawn_radius_m is not null
+        and (cardinality(it.spawn_from) = 0 or s.id = any (it.spawn_from))
         and private.dist_m(private.anchor(f.geometry), pos) <= s.spawn_radius_m * 1.001 + 1) as ok
   ), in_zone as (
     select exists (
@@ -840,6 +869,10 @@ begin
       if j ? 'order' and (jsonb_typeof(j -> 'order') <> 'string' or char_length(j ->> 'order') not between 1 and 2000) then
         raise exception 'invalid order text' using errcode = '22023';
       end if;
+      if strict and j ? 'geometry' and exists (
+        select 1 from public.tech_items x where x.id::text = f.props ->> 'tech' and x.map_id = f.map_id and not x.can_move) then
+        raise exception '% cannot be moved', coalesce(nullif(f.props ->> 'name', ''), 'this building') using errcode = '42501';
+      end if;
       -- Measured from where the unit is on the live map, i.e. where it started the turn.
       if strict and j ? 'geometry' then
         r := private.radius_for(t.id, t.default_radius_m, f.id, f.asset_id);
@@ -905,6 +938,9 @@ declare
   it public.tech_items;
   cost_s bigint;
   cost_r bigint;
+  -- The player as purchases see them: what this draft researches counts as researched, so a unit
+  -- can be bought the same turn its research is done. Research itself still needs earlier turns.
+  pp public.players := p;
 begin
   if jsonb_typeof(p_changes) is distinct from 'array' then
     raise exception 'a draft is a list of changes' using errcode = '22023';
@@ -912,6 +948,9 @@ begin
   if jsonb_array_length(p_changes) > 200 or octet_length(p_changes::text) > 256000 then
     raise exception 'draft is too large' using errcode = '22023';
   end if;
+  pp.tech_unlocked := p.tech_unlocked || coalesce(array(
+    select (ch ->> 'feature_id')::uuid from jsonb_array_elements(p_changes) ch
+    where ch ->> 'op' = 'research' and not ((ch ->> 'feature_id')::uuid = any (p_rejected))), '{}');
   for c in select * from jsonb_array_elements(p_changes) loop
     op := c ->> 'op';
     fid := (c ->> 'feature_id')::uuid;
@@ -944,7 +983,7 @@ begin
       end if;
     end if;
     if not (fid = any (p_rejected)) then
-      perform private.check_change(p, t, op, fid, clean, strict);
+      perform private.check_change(case when op = 'create' then pp else p end, t, op, fid, clean, strict);
     end if;
     result := result || jsonb_build_array(jsonb_build_object('op', op, 'feature_id', fid, 'payload', clean));
   end loop;
@@ -1818,6 +1857,7 @@ declare
   tid uuid := coalesce(nullif(p ->> 'id', '')::uuid, gen_random_uuid());
   asset uuid := nullif(p ->> 'asset_id', '')::uuid;
   pre uuid[] := coalesce(array(select distinct jsonb_array_elements_text(case when jsonb_typeof(p -> 'prereqs') = 'array' then p -> 'prereqs' else '[]' end)::uuid), '{}');
+  sfrom uuid[] := coalesce(array(select distinct jsonb_array_elements_text(case when jsonb_typeof(p -> 'spawn_from') = 'array' then p -> 'spawn_from' else '[]' end)::uuid), '{}');
   props jsonb := private.pick(p -> 'props', array['name', 'type', 'speed', 'sizeMode', 'sizePx', 'sizeM', 'tint', 'showLabel']);
 begin
   perform private.need_map(p_map_id);
@@ -1833,17 +1873,25 @@ begin
   if not private.valid_props(props, '{}') then
     raise exception 'invalid properties' using errcode = '22023';
   end if;
+  if exists (select 1 from unnest(sfrom) r where r not in (select x.id from public.tech_items x where x.map_id = p_map_id and x.id <> tid)) then
+    raise exception 'a producing building is not in this tech tree' using errcode = '22023';
+  end if;
   insert into public.tech_items (id, map_id, name, description, tier, sort, research_cost, spawn_cost, prereqs, buyable,
-                                 asset_id, sidc, props, income_spawn, income_research, spawn_radius_m, placement)
+                                 asset_id, sidc, props, income_spawn, income_research, spawn_radius_m, placement, pos_x, pos_y,
+                                 category, can_move, spawn_from)
   values (tid, p_map_id, trim(p ->> 'name'), nullif(trim(p ->> 'description'), ''), coalesce((p ->> 'tier')::integer, 1),
           coalesce((p ->> 'sort')::integer, 0), coalesce((p ->> 'research_cost')::integer, 0), coalesce((p ->> 'spawn_cost')::integer, 0),
           pre, coalesce((p ->> 'buyable')::boolean, true), asset, case when asset is null then nullif(p ->> 'sidc', '') end, props,
           coalesce((p ->> 'income_spawn')::integer, 0), coalesce((p ->> 'income_research')::integer, 0),
-          nullif((p ->> 'spawn_radius_m')::float8, 0), coalesce(p ->> 'placement', 'either'))
+          nullif((p ->> 'spawn_radius_m')::float8, 0), coalesce(p ->> 'placement', 'either'),
+          (p ->> 'pos_x')::float8, (p ->> 'pos_y')::float8,
+          coalesce(p ->> 'category', 'unit'), coalesce((p ->> 'can_move')::boolean, true), sfrom)
   on conflict (id) do update set name = excluded.name, description = excluded.description, tier = excluded.tier, sort = excluded.sort,
     research_cost = excluded.research_cost, spawn_cost = excluded.spawn_cost, prereqs = excluded.prereqs, buyable = excluded.buyable,
     asset_id = excluded.asset_id, sidc = excluded.sidc, props = excluded.props, income_spawn = excluded.income_spawn,
-    income_research = excluded.income_research, spawn_radius_m = excluded.spawn_radius_m, placement = excluded.placement;
+    income_research = excluded.income_research, spawn_radius_m = excluded.spawn_radius_m, placement = excluded.placement,
+    pos_x = coalesce(excluded.pos_x, public.tech_items.pos_x), pos_y = coalesce(excluded.pos_y, public.tech_items.pos_y),
+    category = excluded.category, can_move = excluded.can_move, spawn_from = excluded.spawn_from;
   -- No loops: an item may not (indirectly) require itself.
   if exists (
     with recursive up (id) as (
@@ -1854,6 +1902,21 @@ begin
     raise exception 'that would make the item require itself' using errcode = '22023';
   end if;
   return tid;
+end $$;
+
+-- Move flowchart boxes. p is [{"id": ..., "x": ..., "y": ...}]; items on other maps are ignored.
+create function public.move_tech_items(p_map_id uuid, p jsonb) returns integer
+language plpgsql volatile security definer set search_path = ''
+as $$
+declare n integer;
+begin
+  perform private.need_map(p_map_id);
+  update public.tech_items t set pos_x = (e ->> 'x')::float8, pos_y = (e ->> 'y')::float8
+    from jsonb_array_elements(case when jsonb_typeof(p) = 'array' then p else '[]' end) e
+   where t.map_id = p_map_id and t.id::text = e ->> 'id'
+     and abs((e ->> 'x')::float8) < 1000000 and abs((e ->> 'y')::float8) < 1000000;
+  get diagnostics n = row_count;
+  return n;
 end $$;
 
 -- Removes the item from the tree and from other items' prerequisites. Units already on the map keep
@@ -1867,6 +1930,7 @@ begin
   delete from public.tech_items where id = p_item_id returning * into t;
   if t.id is null then return; end if;
   update public.tech_items set prereqs = array_remove(prereqs, p_item_id) where map_id = t.map_id and p_item_id = any (prereqs);
+  update public.tech_items set spawn_from = array_remove(spawn_from, p_item_id) where map_id = t.map_id and p_item_id = any (spawn_from);
   update public.players set tech_unlocked = array_remove(tech_unlocked, p_item_id) where map_id = t.map_id and p_item_id = any (tech_unlocked);
   perform private.log(t.map_id, private.actor(), 'deleted tech item', t.name);
 end $$;
@@ -2132,7 +2196,9 @@ begin
     'history', private.history(p.map_id),
     'mine', coalesce((select jsonb_agg(f.id) from public.features f where f.map_id = p.map_id and f.owner_player_id = p.id), '[]'::jsonb),
     -- Movement range per own unit, in metres. Absent or null means unlimited.
-    'radii', coalesce((select jsonb_object_agg(f.id, private.radius_for(t.id, t.default_radius_m, f.id, f.asset_id))
+    'radii', coalesce((select jsonb_object_agg(f.id, case
+                           when exists (select 1 from public.tech_items x where x.id::text = f.props ->> 'tech' and x.map_id = f.map_id and not x.can_move) then 0
+                           else private.radius_for(t.id, t.default_radius_m, f.id, f.asset_id) end)
                          from public.features f where f.map_id = p.map_id and f.owner_player_id = p.id and t.id is not null), '{}'::jsonb),
     'allocations', coalesce((
       select jsonb_agg(jsonb_build_object('id', a.id, 'asset_id', a.asset_id, 'sidc', a.sidc, 'props', a.props, 'quantity', a.quantity,
@@ -2156,7 +2222,8 @@ begin
                               where z.map_id = p.map_id
                                 and (z.player_id = p.id or (z.team is not null and z.team = p.team) or (z.player_id is null and z.team is null))), '[]'::jsonb),
     -- Own units that are spawn points, where they stand now (they may be on a layer this player cannot see).
-    'spawn_points', coalesce((select jsonb_agg(jsonb_build_object('feature_id', f.id, 'center', to_jsonb(private.anchor(f.geometry)), 'radius_m', x.spawn_radius_m, 'name', x.name))
+    'spawn_points', coalesce((select jsonb_agg(jsonb_build_object('feature_id', f.id, 'center', to_jsonb(private.anchor(f.geometry)), 'radius_m', x.spawn_radius_m,
+                                  'name', x.name, 'item_id', x.id))
                                 from public.features f join public.tech_items x on x.id::text = f.props ->> 'tech' and x.map_id = f.map_id
                                where f.map_id = p.map_id and f.owner_player_id = p.id and x.spawn_radius_m is not null), '[]'::jsonb),
     -- Outcome of the most recent pushed turn: what was applied, what was turned down, and the owner's note.
@@ -2314,7 +2381,8 @@ begin
         'open_turn','update_turn','set_move_rule','save_allocation','delete_allocation','lock_turn','unlock_turn','review_draft','push_turn','get_turn',
         'get_snapshot','rollback_to','export_campaign','import_campaign','create_share_link','update_share_link','get_shared_map',
         'get_settings','set_discord_webhook','test_discord_webhook','claim_invite','get_player_state','get_player_history','save_draft','set_ready',
-        'get_economy','save_tech_item','delete_tech_item','save_spawn_zone','delete_spawn_zone','set_player_points','set_player_tech']) then
+        'get_economy','save_tech_item','delete_tech_item','save_spawn_zone','delete_spawn_zone','set_player_points','set_player_tech',
+        'move_tech_items']) then
       execute 'revoke all on function ' || r.sig || ' from public, anon';
       execute 'grant execute on function ' || r.sig || ' to authenticated';
       if r.proname in ('app_status', 'keepalive', 'get_shared_map') then
@@ -2355,7 +2423,7 @@ exception when others then
   raise notice 'pg_net is not available here; Discord announcements are disabled';
 end $$;
 
-insert into public.app_meta (key, value) values ('schema_version', '4')
+insert into public.app_meta (key, value) values ('schema_version', '5')
 on conflict (key) do update set value = excluded.value, updated_at = now();
 
 commit;

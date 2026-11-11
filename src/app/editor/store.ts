@@ -30,6 +30,8 @@ interface Ed extends Doc {
   review: { playerId: string } | null;
   /** A past turn shown read-only in place of the live map. */
   viewing: SnapshotPayload | null;
+  /** The owner is drawing a spawn zone: the Tech window comes back once a polygon or circle is selected. */
+  zoneDraw: boolean;
   selection: string[];
   tool: Tool;
   activeLayerId: string | null;
@@ -87,6 +89,7 @@ export const useEd = create<Ed>()((set, get) => ({
   bundle: null,
   showDrafts: false,
   review: null,
+  zoneDraw: false,
   viewing: null,
   selection: [],
   tool: 'select',

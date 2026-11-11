@@ -228,6 +228,7 @@ export class Backend {
   getEconomy = (mapId: string) => this.rpc<Economy>('get_economy', { p_map_id: mapId });
   saveTechItem = (mapId: string, item: Partial<TechItem>) => this.rpc<string>('save_tech_item', { p_map_id: mapId, p: item });
   deleteTechItem = (id: string) => this.rpc<void>('delete_tech_item', { p_item_id: id });
+  moveTechItems = (mapId: string, moves: { id: string; x: number; y: number }[]) => this.rpc<number>('move_tech_items', { p_map_id: mapId, p: moves });
   saveSpawnZone = (mapId: string, z: Partial<SpawnZone>) => this.rpc<string>('save_spawn_zone', { p_map_id: mapId, p: z });
   deleteSpawnZone = (id: string) => this.rpc<void>('delete_spawn_zone', { p_zone_id: id });
   setPlayerPoints = (playerId: string, spawn: number | null, research: number | null) =>
