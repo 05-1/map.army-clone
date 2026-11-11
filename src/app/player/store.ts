@@ -1,9 +1,10 @@
 import { create } from 'zustand';
 import { MAX_CHANGES, proposed, putChange, removeChange } from '../lib/submissions';
 import type { Change, CreatePayload, Feature, PlayerAllocation, PlayerState, SnapshotPayload } from '../lib/types';
+import { draftCost } from '../lib/tech';
 import { saveDraft } from './client';
 
-export type PTool = 'select' | 'place' | 'text' | 'arrow' | 'line' | 'polygon';
+export type PTool = 'select' | 'place' | 'buy' | 'text' | 'arrow' | 'line' | 'polygon';
 export type SaveStatus = 'saved' | 'dirty' | 'saving' | 'error';
 
 interface Play {
@@ -18,6 +19,8 @@ interface Play {
   tool: PTool;
   /** Allocation being placed from (tool = 'place'). */
   allocId: string | null;
+  /** Tech item being bought and placed (tool = 'buy'). */
+  buyId: string | null;
   sel: string | null;
   hint: string;
   /** A past turn shown read-only in place of the live map. */
@@ -36,6 +39,8 @@ interface Play {
   /** Send the draft now (also used to retry after an error). */
   flush(): Promise<void>;
   setTool(t: PTool, allocId?: string | null): void;
+  /** Start placing units bought from this tech item. */
+  startBuy(itemId: string): void;
   say(hint: string): void;
 }
 
@@ -60,6 +65,7 @@ export const usePlay = create<Play>()((set, get) => {
     savedAt: null,
     tool: 'select',
     allocId: null,
+    buyId: null,
     sel: null,
     hint: '',
     viewing: null,
@@ -80,7 +86,7 @@ export const usePlay = create<Play>()((set, get) => {
         state, draft,
         ...(takeServer ? { savedAt: state.draft?.updated_at ?? null, saveStatus: 'saved' as const, saveError: '' } : {}),
         sel: prev.sel && known(prev.sel) ? prev.sel : null,
-        ...(newTurn ? { tool: 'select' as const, allocId: null } : {}),
+        ...(newTurn ? { tool: 'select' as const, allocId: null, buyId: null } : {}),
       });
       if (newTurn && prev.state?.turn && state.last) get().say(`Turn ${state.last.number} was pushed. See the result on the left.`);
     },
@@ -136,7 +142,8 @@ export const usePlay = create<Play>()((set, get) => {
         void get().flush();
       }
     },
-    setTool: (tool, allocId = null) => set({ tool, allocId, hint: '' }),
+    setTool: (tool, allocId = null) => set({ tool, allocId, buyId: null, hint: '' }),
+    startBuy: (buyId) => set({ tool: 'buy', buyId, allocId: null, hint: '' }),
     say(hint) {
       set({ hint });
       clearTimeout(hintTimer);
@@ -149,6 +156,14 @@ export const usePlay = create<Play>()((set, get) => {
 export function remaining(a: PlayerAllocation, draft: Change[]): number {
   const mine = draft.filter((c) => c.op === 'create' && c.payload.allocation_id === a.id).length;
   return Math.max(0, a.quantity - a.used_by_others - mine);
+}
+
+/** Spawn and research points left after what this draft spends. */
+export function pointsLeft(): { spawn: number; research: number } {
+  const { state, draft } = usePlay.getState();
+  if (!state) return { spawn: 0, research: 0 };
+  const c = draftCost(draft, state.tech);
+  return { spawn: state.economy.spawn_points - c.spawn, research: state.economy.research_points - c.research };
 }
 
 /** A feature as it would look with the draft applied, plus how the player may act on it. */

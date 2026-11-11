@@ -260,3 +260,40 @@ input:disabled, select:disabled { opacity: 0.45; }
 .play .banner { top: 64px; }
 .vfoot { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
 .status .tslider { margin-right: 10px; }
+
+/* ---------- tech tree ---------- */
+.techtree { position: relative; display: flex; gap: 48px; overflow: auto; padding: 8px 4px 12px; min-height: 120px; max-height: 60vh; scrollbar-width: thin; }
+.techlines { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+.techlines path { fill: none; stroke: var(--line); stroke-width: 2; }
+.techlines path.hot { stroke: var(--sel); }
+.techcol { display: flex; flex-direction: column; gap: 10px; flex: none; width: 190px; position: relative; }
+.techtier { font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--mute); }
+.techcard { position: relative; display: grid; gap: 4px; padding: 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); cursor: default; }
+.techcard[role='button'] { cursor: pointer; }
+.techcard[role='button']:hover { border-color: var(--mute); }
+.techcard.on { border-color: var(--sel); box-shadow: 0 0 0 1px var(--sel); }
+.techcard.unlocked { border-left: 3px solid var(--ok); }
+.techcard.researching { border-left: 3px solid var(--accent); }
+.techcard.locked { opacity: 0.55; }
+.techcard .techhead { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.techcard strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.techcard small { color: var(--mute); font-size: 11px; }
+.techcard .perks { color: var(--ok); }
+.techcard .tag { justify-self: start; margin-left: 0; }
+.techcard .btn { justify-self: start; }
+.techdot { display: inline-grid; place-items: center; color: var(--mute); font-size: 12px; }
+.dialog.xwide { width: min(1100px, 100%); }
+.techedit { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 14px; align-items: start; }
+.techedit .form { display: flex; flex-direction: column; gap: 10px; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
+@media (max-width: 860px) { .techedit { grid-template-columns: 1fr; } }
+.points { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 13px; }
+.points b { font-family: var(--mono); }
+.points .neg { color: var(--danger); }
+.ptable { width: 100%; border-collapse: collapse; font-size: 12px; }
+.ptable th { text-align: left; color: var(--mute); font-weight: 500; padding: 4px 6px; }
+.ptable td { padding: 4px 6px; border-top: 1px solid var(--line); vertical-align: middle; }
+.ptable input[type='number'] { width: 90px; }
+.dialog.xwide > * { flex: none; }
+.techedit .row2 > .btn.primary:first-child { flex: none; }
+.bulk { display: grid; grid-template-columns: minmax(0, 1fr) 130px 130px auto; gap: 8px; align-items: end; }
+@media (max-width: 640px) { .bulk { grid-template-columns: 1fr 1fr; } }

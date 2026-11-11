@@ -19,7 +19,8 @@ declare r record;
 begin
   for r in select policyname, tablename from pg_policies
             where schemaname = 'public' and tablename = any (array['maps','layers','features','assets','share_links','players',
-              'turns','turn_move_rules','allocations','drafts','snapshots','activity','app_meta','submissions','submission_changes']) loop
+              'turns','turn_move_rules','allocations','drafts','snapshots','activity','app_meta','submissions','submission_changes',
+              'tech_items','spawn_zones']) loop
     execute format('drop policy %I on public.%I', r.policyname, r.tablename);
   end loop;
   -- Everything in `private` is ours. Cascade also removes the triggers and column defaults that use them; both are re-created below.
@@ -37,6 +38,7 @@ begin
               'create_share_link','update_share_link','get_shared_map',
               'get_settings','set_discord_webhook','test_discord_webhook',
               'claim_invite','get_player_state','get_player_history','save_draft','set_ready',
+              'get_economy','save_tech_item','delete_tech_item','save_spawn_zone','delete_spawn_zone','set_player_points','set_player_tech',
               'submit_turn','withdraw_submission','review_submission']) loop
     execute 'drop function ' || r.sig || ' cascade';
   end loop;
@@ -260,6 +262,52 @@ create table if not exists public.activity (
 );
 create index if not exists activity_map_idx on public.activity (map_id, id desc);
 
+-- Tech tree (schema 4). One tree per map. Each item is a node: research unlocks it for one player
+-- (research_cost 0 = available from the start), and a buyable item is a unit that player may then buy
+-- with spawn points, as often as they can afford. Units on the map carry their item in props.tech;
+-- that is what pays income each push and what makes a unit a spawn point.
+create table if not exists public.tech_items (
+  id              uuid primary key default gen_random_uuid(),
+  map_id          uuid not null references public.maps (id) on delete cascade,
+  name            text not null check (char_length(name) between 1 and 80),
+  description     text check (description is null or char_length(description) <= 1000),
+  tier            integer not null default 1 check (tier between 0 and 50),       -- column in the tree
+  sort            integer not null default 0,                                     -- order within the column
+  research_cost   integer not null default 0 check (research_cost between 0 and 1000000),
+  spawn_cost      integer not null default 0 check (spawn_cost between 0 and 1000000),
+  prereqs         uuid[] not null default '{}',
+  buyable         boolean not null default true,
+  asset_id        uuid references public.assets (id),                             -- a graphic ...
+  sidc            text check (sidc is null or sidc ~ '^[A-Za-z0-9*-]{10,30}$'),   -- ... or a NATO symbol
+  props           jsonb not null default '{}' check (octet_length(props::text) < 4000),  -- template: name, size
+  income_spawn    integer not null default 0 check (income_spawn between 0 and 1000000),
+  income_research integer not null default 0 check (income_research between 0 and 1000000),
+  spawn_radius_m  double precision check (spawn_radius_m is null or spawn_radius_m > 0),  -- set = this unit is a spawn point
+  placement       text not null default 'either' check (placement in ('spawn', 'zone', 'either', 'anywhere')),
+  created_at      timestamptz not null default now(),
+  check (asset_id is null or sidc is null),
+  check (not buyable or asset_id is not null or sidc is not null)
+);
+create index if not exists tech_items_map_idx on public.tech_items (map_id);
+
+-- Areas where bought units may be placed: for one player, a team, or (both null) everyone on the map.
+create table if not exists public.spawn_zones (
+  id         uuid primary key default gen_random_uuid(),
+  map_id     uuid not null references public.maps (id) on delete cascade,
+  name       text check (name is null or char_length(name) <= 80),
+  player_id  uuid references public.players (id) on delete cascade,
+  team       text check (team is null or char_length(team) between 1 and 40),
+  zone       jsonb not null,
+  created_at timestamptz not null default now(),
+  check (player_id is null or team is null)
+);
+create index if not exists spawn_zones_map_idx on public.spawn_zones (map_id);
+
+alter table public.players
+  add column if not exists spawn_points    integer not null default 0,
+  add column if not exists research_points integer not null default 0,
+  add column if not exists tech_unlocked   uuid[]  not null default '{}';
+
 -- Upgrade from the allowlist used before co-admins existed: the creator of the oldest map becomes the owner.
 do $$ begin
   if to_regclass('private.owners') is not null then
@@ -403,7 +451,11 @@ as $$
                           from public.layers l where l.map_id = p_map_id), '[]'::jsonb),
     'features', coalesce((select jsonb_agg(jsonb_build_object('id', f.id, 'layer_id', f.layer_id, 'kind', f.kind, 'geometry', f.geometry,
                             'props', f.props, 'style', f.style, 'asset_id', f.asset_id, 'z', f.z, 'owner_player_id', f.owner_player_id))
-                          from public.features f where f.map_id = p_map_id), '[]'::jsonb)
+                          from public.features f where f.map_id = p_map_id), '[]'::jsonb),
+    -- Points and research per player, so a rollback puts them back too. Never sent to players or viewers.
+    'economy', coalesce((select jsonb_object_agg(p.id, jsonb_build_object('spawn_points', p.spawn_points,
+                            'research_points', p.research_points, 'tech_unlocked', to_jsonb(p.tech_unlocked)))
+                          from public.players p where p.map_id = p_map_id), '{}'::jsonb)
   );
 $$;
 
@@ -537,6 +589,7 @@ as $$
      and private.num_in(props -> 'fontSize', 8, 96)
      and (props -> 'tint' is null or props -> 'tint' = 'null'::jsonb or private.str_ok(props -> 'tint', 7, '^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$'))
      and (props -> 'showLabel' is null or jsonb_typeof(props -> 'showLabel') = 'boolean')
+     and private.str_ok(props -> 'tech', 36, '^[0-9a-f-]{36}$')
      and private.str_ok(style -> 'color', 7, '^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$')
      and private.str_ok(style -> 'dash', 5, '^(solid|dash|dot)$')
      and private.num_in(style -> 'width', 1, 16)
@@ -621,7 +674,7 @@ create function private.clean_payload(p_op text, j jsonb) returns jsonb
 language sql immutable set search_path = ''
 as $$
   select case p_op
-    when 'create' then private.pick(j, array['kind', 'geometry', 'asset_id', 'allocation_id']) || jsonb_build_object(
+    when 'create' then private.pick(j, array['kind', 'geometry', 'asset_id', 'allocation_id', 'purchase_id']) || jsonb_build_object(
       'props', private.pick(j -> 'props', array['name', 'type', 'heading', 'speed', 'notes', 'timestamp', 'sidc',
                                                 'sizeMode', 'sizePx', 'sizeM', 'tint', 'showLabel', 'radius', 'fontSize']),
       'style', private.pick(j -> 'style', array['color', 'width', 'dash', 'fillOpacity']))
@@ -629,6 +682,49 @@ as $$
     else '{}'::jsonb
   end;
 $$;
+
+-- A tech item this player may use: free from the start, or researched.
+create function private.unlocked(p public.players, it public.tech_items) returns boolean
+language sql stable set search_path = ''
+as $$ select it.research_cost = 0 or it.id = any (p.tech_unlocked); $$;
+
+-- May this player put a unit bought from this item at position pos? Spawn points count where the
+-- player's units stand on the live map, i.e. where they started the turn.
+create function private.can_spawn_at(p public.players, it public.tech_items, pos float8[]) returns boolean
+language sql stable set search_path = ''
+as $$
+  with near_spawn as (
+    select exists (
+      select 1 from public.features f join public.tech_items s on s.id::text = f.props ->> 'tech' and s.map_id = f.map_id
+      where f.map_id = p.map_id and f.owner_player_id = p.id and s.spawn_radius_m is not null
+        and private.dist_m(private.anchor(f.geometry), pos) <= s.spawn_radius_m * 1.001 + 1) as ok
+  ), in_zone as (
+    select exists (
+      select 1 from public.spawn_zones z
+      where z.map_id = p.map_id
+        and (z.player_id = p.id or (z.team is not null and z.team = p.team) or (z.player_id is null and z.team is null))
+        and private.in_zone(z.zone, pos)) as ok
+  )
+  select case it.placement
+    when 'anywhere' then true
+    when 'spawn' then (select ok from near_spawn)
+    when 'zone' then (select ok from in_zone)
+    else (select ok from near_spawn) or (select ok from in_zone)
+  end;
+$$;
+
+-- What each player's units on the map would earn at the next push.
+create function private.income(p_player_id uuid) returns jsonb
+language sql stable set search_path = ''
+as $$
+  select jsonb_build_object('spawn', coalesce(sum(t.income_spawn), 0), 'research', coalesce(sum(t.income_research), 0))
+  from public.features f join public.tech_items t on t.id::text = f.props ->> 'tech' and t.map_id = f.map_id
+  where f.owner_player_id = p_player_id;
+$$;
+
+create function private.tech_json(t public.tech_items) returns jsonb
+language sql stable set search_path = ''
+as $$ select to_jsonb(t) - 'map_id' - 'created_at'; $$;
 
 -- Raises unless this change is allowed. strict = the player's rules (ownership, movement radius,
 -- allocation, zone). Not strict = the owner editing a draft: structure and map membership only.
@@ -638,6 +734,7 @@ as $$
 declare
   f public.features;
   a public.allocations;
+  it public.tech_items;
   k text;
   want text;
   r float8;
@@ -668,8 +765,30 @@ begin
     if exists (select 1 from public.features x where x.id = p_fid) then
       raise exception 'object id already exists' using errcode = '22023';
     end if;
-    -- Units come out of an allocation. Drawings (arrows, lines, areas, notes) are free.
-    if strict and k in ('symbol', 'asset') then
+    -- Units are bought from the tech tree or come out of an allocation. Drawings (arrows, lines, areas, notes) are free.
+    if nullif(j ->> 'purchase_id', '') is not null then
+      if nullif(j ->> 'allocation_id', '') is not null then
+        raise exception 'a unit is bought or allocated, not both' using errcode = '22023';
+      end if;
+      select * into it from public.tech_items x where x.id = (j ->> 'purchase_id')::uuid and x.map_id = p.map_id;
+      if not found or not it.buyable then
+        raise exception 'that item cannot be bought' using errcode = '42501';
+      end if;
+      if (k = 'symbol' and (it.sidc is null or j -> 'props' ->> 'sidc' is distinct from it.sidc))
+         or (k = 'asset' and (it.asset_id is null or (j ->> 'asset_id')::uuid is distinct from it.asset_id))
+         or k not in ('symbol', 'asset') then
+        raise exception 'unit does not match its tech item' using errcode = '42501';
+      end if;
+      if strict and not private.unlocked(p, it) then
+        raise exception '% is not researched yet', it.name using errcode = '42501';
+      end if;
+      if strict and not private.can_spawn_at(p, it, private.anchor(j -> 'geometry')) then
+        raise exception '% must be placed %', it.name, case it.placement
+          when 'spawn' then 'within range of one of your spawn points'
+          when 'zone' then 'inside one of your spawn zones'
+          else 'near one of your spawn points or inside a spawn zone' end using errcode = '42501';
+      end if;
+    elsif strict and k in ('symbol', 'asset') then
       select * into a from public.allocations x
        where x.id = nullif(j ->> 'allocation_id', '')::uuid and x.turn_id = t.id
          and (x.player_id = p.id or (x.team is not null and x.team <> '' and x.team = p.team));
@@ -686,6 +805,20 @@ begin
     end if;
     if k = 'asset' and not exists (select 1 from public.assets x where x.id = nullif(j ->> 'asset_id', '')::uuid) then
       raise exception 'unknown graphic' using errcode = '22023';
+    end if;
+
+  elsif p_op = 'research' then
+    select * into it from public.tech_items x where x.id = p_fid and x.map_id = p.map_id;
+    if not found then
+      raise exception 'unknown tech item' using errcode = '22023';
+    end if;
+    if private.unlocked(p, it) then
+      raise exception '% is already available', it.name using errcode = '22023';
+    end if;
+    if strict and exists (
+      select 1 from unnest(it.prereqs) as need (item_id) join public.tech_items x on x.id = need.item_id
+      where not private.unlocked(p, x)) then
+      raise exception '% needs its prerequisites researched first', it.name using errcode = '42501';
     end if;
 
   elsif p_op in ('update', 'delete') then
@@ -732,6 +865,26 @@ as $$
     and not ((c ->> 'feature_id')::uuid = any (d.rejected));
 $$;
 
+-- The tech items a draft spends points on: one row per purchase (spawn cost) and per research (research cost).
+-- Rows are (item_id, kind) with kind 'buy' or 'research'; draft_costs joins them to their prices.
+create function private.draft_items(p_changes jsonb, p_rejected uuid[]) returns table (item_id uuid, kind text)
+language sql immutable set search_path = ''
+as $$
+  select case when c ->> 'op' = 'research' then (c ->> 'feature_id')::uuid else (c -> 'payload' ->> 'purchase_id')::uuid end,
+         case when c ->> 'op' = 'research' then 'research' else 'buy' end
+  from jsonb_array_elements(p_changes) c
+  where not ((c ->> 'feature_id')::uuid = any (p_rejected))
+    and (c ->> 'op' = 'research' or (c ->> 'op' = 'create' and nullif(c -> 'payload' ->> 'purchase_id', '') is not null));
+$$;
+
+-- Per change: the item and which price applies. Research costs research points, a purchase spawn points.
+create function private.draft_costs(p_changes jsonb, p_rejected uuid[]) returns table (item_id uuid, spawn bigint, research bigint)
+language sql stable set search_path = ''
+as $$
+  select d.item_id, case when d.kind = 'buy' then t.spawn_cost else 0 end, case when d.kind = 'research' then t.research_cost else 0 end
+  from private.draft_items(p_changes, p_rejected) d join public.tech_items t on t.id = d.item_id;
+$$;
+
 -- Validate a whole draft and return it in stored form. Changes listed in p_rejected are kept but
 -- not checked: they will never be applied.
 create function private.normalise(p public.players, t public.turns, p_changes jsonb, strict boolean, p_rejected uuid[] default '{}') returns jsonb
@@ -749,6 +902,9 @@ declare
   aid uuid;
   quota integer;
   others integer;
+  it public.tech_items;
+  cost_s bigint;
+  cost_r bigint;
 begin
   if jsonb_typeof(p_changes) is distinct from 'array' then
     raise exception 'a draft is a list of changes' using errcode = '22023';
@@ -774,6 +930,18 @@ begin
                    || case when a.sidc is not null then jsonb_build_object('sidc', a.sidc) else '{}'::jsonb end,
           'style', '{}'::jsonb);
       end if;
+    elsif op = 'create' and nullif(clean ->> 'purchase_id', '') is not null then
+      -- Same for a purchase: the tech item is the template, and the unit remembers its item.
+      select * into it from public.tech_items x where x.id = (clean ->> 'purchase_id')::uuid and x.map_id = p.map_id;
+      if found then
+        clean := clean || jsonb_build_object(
+          'kind', case when it.asset_id is not null then 'asset' else 'symbol' end,
+          'asset_id', it.asset_id,
+          'props', it.props || private.pick(clean -> 'props', array['name', 'heading'])
+                   || case when it.sidc is not null then jsonb_build_object('sidc', it.sidc) else '{}'::jsonb end
+                   || jsonb_build_object('tech', it.id),
+          'style', '{}'::jsonb);
+      end if;
     end if;
     if not (fid = any (p_rejected)) then
       perform private.check_change(p, t, op, fid, clean, strict);
@@ -794,6 +962,14 @@ begin
         raise exception 'allocation used up: % of % already taken by your team', least(quota, others), quota using errcode = '42501';
       end if;
     end loop;
+    select coalesce(sum(c.spawn), 0), coalesce(sum(c.research), 0) into cost_s, cost_r
+      from private.draft_costs(result, p_rejected) c;
+    if cost_s > p.spawn_points then
+      raise exception 'not enough spawn points: this draft costs %, you have %', cost_s, p.spawn_points using errcode = '42501';
+    end if;
+    if cost_r > p.research_points then
+      raise exception 'not enough research points: this draft costs %, you have %', cost_r, p.research_points using errcode = '42501';
+    end if;
   end if;
   return result;
 end $$;
@@ -812,6 +988,14 @@ begin
     insert into public.features (id, map_id, layer_id, kind, geometry, props, style, asset_id, z, owner_player_id)
     values (fid, p_map_id, p_layer_id, j ->> 'kind', j -> 'geometry', coalesce(j -> 'props', '{}'), coalesce(j -> 'style', '{}'),
             case when j ->> 'kind' = 'asset' then (j ->> 'asset_id')::uuid end, p_z, p.id);
+    if nullif(j ->> 'purchase_id', '') is not null then
+      update public.players x set spawn_points = x.spawn_points - t.spawn_cost
+        from public.tech_items t where t.id = (j ->> 'purchase_id')::uuid and x.id = p.id;
+    end if;
+  elsif c ->> 'op' = 'research' then
+    update public.players x set research_points = x.research_points - t.research_cost,
+                                tech_unlocked = array_append(x.tech_unlocked, t.id)
+      from public.tech_items t where t.id = fid and t.map_id = p_map_id and x.id = p.id and not (t.id = any (x.tech_unlocked));
   elsif c ->> 'op' = 'update' then
     update public.features ft set
       geometry = coalesce(j -> 'geometry', ft.geometry),
@@ -842,6 +1026,13 @@ begin
            (select a.id from public.assets a where a.id = nullif(e ->> 'asset_id', '')::uuid), (e ->> 'z')::integer,
            (select pl.id from public.players pl where pl.id = nullif(e ->> 'owner_player_id', '')::uuid and pl.map_id = p_map_id)
     from jsonb_array_elements(s -> 'features') e;
+  -- Snapshots from before schema 4 have no economy: balances then stay as they are.
+  update public.players pl set
+    spawn_points = coalesce((e.value ->> 'spawn_points')::integer, pl.spawn_points),
+    research_points = coalesce((e.value ->> 'research_points')::integer, pl.research_points),
+    tech_unlocked = coalesce(array(select jsonb_array_elements_text(e.value -> 'tech_unlocked')::uuid), pl.tech_unlocked)
+  from jsonb_each(coalesce(s -> 'economy', '{}'::jsonb)) e
+  where pl.map_id = p_map_id and pl.id::text = e.key;
 end $$;
 
 create function private.pin_hash(p_salt text, p_pin text) returns text
@@ -1498,6 +1689,7 @@ begin
                          from public.turn_move_rules r where r.turn_id = t.id), '[]'::jsonb),
     'allocations', coalesce((select jsonb_agg(to_jsonb(a) - 'turn_id' order by a.created_at) from public.allocations a where a.turn_id = t.id), '[]'::jsonb),
     'drafts', coalesce((select jsonb_agg(to_jsonb(d) - 'turn_id' order by d.updated_at) from public.drafts d where d.turn_id = t.id), '[]'::jsonb),
+    'economy', private.economy_json(p_map_id),
     'history', private.history(p_map_id),
     'server_time', now());
 end $$;
@@ -1558,6 +1750,17 @@ begin
     end loop;
   end loop;
 
+  -- Income: every unit on the map that carries a tech item pays its owner, after this turn's moves,
+  -- purchases and losses. Revoked seats earn nothing.
+  update public.players x set
+    spawn_points = x.spawn_points + i.s,
+    research_points = x.research_points + i.r
+  from (select f.owner_player_id as pid, sum(ti.income_spawn)::integer as s, sum(ti.income_research)::integer as r
+          from public.features f join public.tech_items ti on ti.id::text = f.props ->> 'tech' and ti.map_id = f.map_id
+         where f.map_id = t.map_id and f.owner_player_id is not null
+         group by f.owner_player_id) i
+  where x.id = i.pid and not x.revoked and (i.s <> 0 or i.r <> 0);
+
   update public.turns set status = 'pushed', pushed_at = now() where id = t.id;
   insert into public.snapshots (map_id, turn_number, label, payload)
   values (t.map_id, t.number, case when t.rollback_of is not null then 'Rolled back from turn ' || t.rollback_of end, private.snapshot_now(t.map_id));
@@ -1582,6 +1785,153 @@ begin
   perform private.notify_discord(t.map_id, 'Turn ' || t.number || ' of "' || (select name from public.maps where id = t.map_id)
     || '" is live. Turn ' || next_n || ' is open for orders.');
   return jsonb_build_object('pushed', t.number, 'next', next_n, 'applied', applied);
+end $$;
+
+-- ---------------------------------------------------------------------------
+-- 7b. Tech tree, points and spawn zones (owner side)
+-- ---------------------------------------------------------------------------
+
+create function private.economy_json(p_map_id uuid) returns jsonb
+language sql stable set search_path = ''
+as $$
+  select jsonb_build_object(
+    'items', coalesce((select jsonb_agg(private.tech_json(t) order by t.tier, t.sort, t.name) from public.tech_items t where t.map_id = p_map_id), '[]'::jsonb),
+    'zones', coalesce((select jsonb_agg(to_jsonb(z) - 'map_id' order by z.created_at) from public.spawn_zones z where z.map_id = p_map_id), '[]'::jsonb),
+    'players', coalesce((select jsonb_agg(jsonb_build_object('id', p.id, 'spawn_points', p.spawn_points, 'research_points', p.research_points,
+                           'tech_unlocked', to_jsonb(p.tech_unlocked), 'income', private.income(p.id)) order by p.created_at)
+                         from public.players p where p.map_id = p_map_id), '[]'::jsonb));
+$$;
+
+create function public.get_economy(p_map_id uuid) returns jsonb
+language plpgsql stable security definer set search_path = ''
+as $$ begin
+  perform private.need_map(p_map_id);
+  return private.economy_json(p_map_id);
+end $$;
+
+-- p may hold: id (to change an existing item), name, description, tier, sort, research_cost, spawn_cost,
+-- prereqs [ids], buyable, asset_id or sidc, props, income_spawn, income_research, spawn_radius_m, placement.
+create function public.save_tech_item(p_map_id uuid, p jsonb) returns uuid
+language plpgsql volatile security definer set search_path = ''
+as $$
+declare
+  tid uuid := coalesce(nullif(p ->> 'id', '')::uuid, gen_random_uuid());
+  asset uuid := nullif(p ->> 'asset_id', '')::uuid;
+  pre uuid[] := coalesce(array(select distinct jsonb_array_elements_text(case when jsonb_typeof(p -> 'prereqs') = 'array' then p -> 'prereqs' else '[]' end)::uuid), '{}');
+  props jsonb := private.pick(p -> 'props', array['name', 'type', 'speed', 'sizeMode', 'sizePx', 'sizeM', 'tint', 'showLabel']);
+begin
+  perform private.need_map(p_map_id);
+  if exists (select 1 from public.tech_items x where x.id = tid and x.map_id <> p_map_id) then
+    raise exception 'tech item is on another map' using errcode = '42501';
+  end if;
+  if asset is not null and not exists (select 1 from public.assets where id = asset) then
+    raise exception 'unknown graphic' using errcode = '22023';
+  end if;
+  if tid = any (pre) or exists (select 1 from unnest(pre) r where r not in (select x.id from public.tech_items x where x.map_id = p_map_id)) then
+    raise exception 'a prerequisite is not in this tech tree' using errcode = '22023';
+  end if;
+  if not private.valid_props(props, '{}') then
+    raise exception 'invalid properties' using errcode = '22023';
+  end if;
+  insert into public.tech_items (id, map_id, name, description, tier, sort, research_cost, spawn_cost, prereqs, buyable,
+                                 asset_id, sidc, props, income_spawn, income_research, spawn_radius_m, placement)
+  values (tid, p_map_id, trim(p ->> 'name'), nullif(trim(p ->> 'description'), ''), coalesce((p ->> 'tier')::integer, 1),
+          coalesce((p ->> 'sort')::integer, 0), coalesce((p ->> 'research_cost')::integer, 0), coalesce((p ->> 'spawn_cost')::integer, 0),
+          pre, coalesce((p ->> 'buyable')::boolean, true), asset, case when asset is null then nullif(p ->> 'sidc', '') end, props,
+          coalesce((p ->> 'income_spawn')::integer, 0), coalesce((p ->> 'income_research')::integer, 0),
+          nullif((p ->> 'spawn_radius_m')::float8, 0), coalesce(p ->> 'placement', 'either'))
+  on conflict (id) do update set name = excluded.name, description = excluded.description, tier = excluded.tier, sort = excluded.sort,
+    research_cost = excluded.research_cost, spawn_cost = excluded.spawn_cost, prereqs = excluded.prereqs, buyable = excluded.buyable,
+    asset_id = excluded.asset_id, sidc = excluded.sidc, props = excluded.props, income_spawn = excluded.income_spawn,
+    income_research = excluded.income_research, spawn_radius_m = excluded.spawn_radius_m, placement = excluded.placement;
+  -- No loops: an item may not (indirectly) require itself.
+  if exists (
+    with recursive up (id) as (
+      select unnest(pre)
+      union
+      select unnest(x.prereqs) from public.tech_items x join up on x.id = up.id
+    ) select 1 from up where up.id = tid) then
+    raise exception 'that would make the item require itself' using errcode = '22023';
+  end if;
+  return tid;
+end $$;
+
+-- Removes the item from the tree and from other items' prerequisites. Units already on the map keep
+-- their props.tech, which then pays nothing. Drafts that buy or research it fail until fixed.
+create function public.delete_tech_item(p_item_id uuid) returns void
+language plpgsql volatile security definer set search_path = ''
+as $$
+declare t public.tech_items;
+begin
+  perform private.need_admin();
+  delete from public.tech_items where id = p_item_id returning * into t;
+  if t.id is null then return; end if;
+  update public.tech_items set prereqs = array_remove(prereqs, p_item_id) where map_id = t.map_id and p_item_id = any (prereqs);
+  update public.players set tech_unlocked = array_remove(tech_unlocked, p_item_id) where map_id = t.map_id and p_item_id = any (tech_unlocked);
+  perform private.log(t.map_id, private.actor(), 'deleted tech item', t.name);
+end $$;
+
+-- p may hold: id, name, player_id or team (neither = everyone), zone.
+create function public.save_spawn_zone(p_map_id uuid, p jsonb) returns uuid
+language plpgsql volatile security definer set search_path = ''
+as $$
+declare
+  zid uuid := coalesce(nullif(p ->> 'id', '')::uuid, gen_random_uuid());
+  pid uuid := nullif(p ->> 'player_id', '')::uuid;
+begin
+  perform private.need_map(p_map_id);
+  if pid is not null and not exists (select 1 from public.players where id = pid and map_id = p_map_id) then
+    raise exception 'player is not on this map' using errcode = '22023';
+  end if;
+  if p -> 'zone' is null or p -> 'zone' = 'null'::jsonb or not private.valid_zone(p -> 'zone') then
+    raise exception 'invalid spawn zone' using errcode = '22023';
+  end if;
+  insert into public.spawn_zones (id, map_id, name, player_id, team, zone)
+  values (zid, p_map_id, nullif(trim(p ->> 'name'), ''), pid, case when pid is null then nullif(trim(p ->> 'team'), '') end, p -> 'zone')
+  on conflict (id) do update set name = excluded.name, player_id = excluded.player_id, team = excluded.team, zone = excluded.zone
+  where public.spawn_zones.map_id = p_map_id;
+  return zid;
+end $$;
+
+create function public.delete_spawn_zone(p_zone_id uuid) returns void
+language plpgsql volatile security definer set search_path = ''
+as $$ begin
+  perform private.need_admin();
+  delete from public.spawn_zones where id = p_zone_id;
+end $$;
+
+-- Set a player's balances. Null keeps a value as it is.
+create function public.set_player_points(p_player_id uuid, p_spawn integer, p_research integer) returns void
+language plpgsql volatile security definer set search_path = ''
+as $$
+declare r public.players;
+begin
+  perform private.need_admin();
+  if p_spawn not between -1000000000 and 1000000000 or p_research not between -1000000000 and 1000000000 then
+    raise exception 'points out of range' using errcode = '22023';
+  end if;
+  update public.players x set spawn_points = coalesce(p_spawn, x.spawn_points), research_points = coalesce(p_research, x.research_points)
+   where x.id = p_player_id returning * into r;
+  if not found then raise exception 'player not found' using errcode = '42501'; end if;
+  perform private.log(r.map_id, private.actor(), 'set points', r.name || ': ' || r.spawn_points || ' spawn, ' || r.research_points || ' research');
+end $$;
+
+-- Grant or take away a researched item without charging points.
+create function public.set_player_tech(p_player_id uuid, p_item_id uuid, p_unlocked boolean) returns void
+language plpgsql volatile security definer set search_path = ''
+as $$
+declare r public.players;
+begin
+  perform private.need_admin();
+  select * into r from public.players where id = p_player_id;
+  if not found then raise exception 'player not found' using errcode = '42501'; end if;
+  if not exists (select 1 from public.tech_items where id = p_item_id and map_id = r.map_id) then
+    raise exception 'unknown tech item' using errcode = '22023';
+  end if;
+  update public.players set tech_unlocked = case when p_unlocked
+      then (select array_agg(distinct x) from unnest(array_append(tech_unlocked, p_item_id)) x)
+      else array_remove(tech_unlocked, p_item_id) end
+   where id = p_player_id;
 end $$;
 
 -- ---------------------------------------------------------------------------
@@ -1641,7 +1991,9 @@ as $$ begin
     'allocations', coalesce((select jsonb_agg(to_jsonb(x)) from public.allocations x join public.turns t on t.id = x.turn_id where t.map_id = p_map_id), '[]'::jsonb),
     'drafts', coalesce((select jsonb_agg(to_jsonb(x)) from public.drafts x join public.turns t on t.id = x.turn_id where t.map_id = p_map_id), '[]'::jsonb),
     'snapshots', coalesce((select jsonb_agg(to_jsonb(x)) from public.snapshots x where x.map_id = p_map_id), '[]'::jsonb),
-    'share_links', coalesce((select jsonb_agg(to_jsonb(x)) from public.share_links x where x.map_id = p_map_id), '[]'::jsonb));
+    'share_links', coalesce((select jsonb_agg(to_jsonb(x)) from public.share_links x where x.map_id = p_map_id), '[]'::jsonb),
+    'tech_items', coalesce((select jsonb_agg(to_jsonb(x)) from public.tech_items x where x.map_id = p_map_id), '[]'::jsonb),
+    'spawn_zones', coalesce((select jsonb_agg(to_jsonb(x)) from public.spawn_zones x where x.map_id = p_map_id), '[]'::jsonb));
 end $$;
 
 -- Restore a backup under its original ids, so existing invite and share links keep working.
@@ -1671,8 +2023,10 @@ begin
     select * from jsonb_populate_recordset(null::public.assets, (select coalesce(jsonb_agg(e - 'owner_id'), '[]'::jsonb) from jsonb_array_elements(p -> 'assets') e))
     on conflict do nothing;
   insert into public.layers select * from jsonb_populate_recordset(null::public.layers, p -> 'layers');
-  insert into public.players (id, map_id, name, team, color, invite_token, visible_layers, target_layer_id, revoked, claimed_at, created_at, pin_salt, pin_hash)
-    select id, map_id, name, team, color, invite_token, visible_layers, target_layer_id, revoked, claimed_at, created_at, pin_salt, pin_hash
+  insert into public.players (id, map_id, name, team, color, invite_token, visible_layers, target_layer_id, revoked, claimed_at, created_at, pin_salt, pin_hash,
+                              spawn_points, research_points, tech_unlocked)
+    select id, map_id, name, team, color, invite_token, visible_layers, target_layer_id, revoked, claimed_at, created_at, pin_salt, pin_hash,
+           coalesce(spawn_points, 0), coalesce(research_points, 0), coalesce(tech_unlocked, '{}')
     from jsonb_populate_recordset(null::public.players, (select coalesce(jsonb_agg(e - 'pin_set'), '[]'::jsonb) from jsonb_array_elements(p -> 'players') e));
   insert into public.features
     select * from jsonb_populate_recordset(null::public.features, (
@@ -1684,8 +2038,12 @@ begin
   insert into public.drafts select * from jsonb_populate_recordset(null::public.drafts, p -> 'drafts');
   insert into public.snapshots select * from jsonb_populate_recordset(null::public.snapshots, p -> 'snapshots');
   insert into public.share_links select * from jsonb_populate_recordset(null::public.share_links, p -> 'share_links');
+  -- Backups from before schema 4 have no tech tree.
+  insert into public.tech_items select * from jsonb_populate_recordset(null::public.tech_items, coalesce(p -> 'tech_items', '[]'));
+  insert into public.spawn_zones select * from jsonb_populate_recordset(null::public.spawn_zones, coalesce(p -> 'spawn_zones', '[]'));
   -- Everything above must belong to the one map in the file.
-  if exists (select 1 from jsonb_array_elements(p -> 'layers' || p -> 'players' || p -> 'features' || p -> 'turns' || p -> 'snapshots' || p -> 'share_links') e
+  if exists (select 1 from jsonb_array_elements(p -> 'layers' || p -> 'players' || p -> 'features' || p -> 'turns' || p -> 'snapshots' || p -> 'share_links'
+                                                || coalesce(p -> 'tech_items', '[]') || coalesce(p -> 'spawn_zones', '[]')) e
                  where e ->> 'map_id' is distinct from mid::text)
      or exists (select 1 from jsonb_array_elements(p -> 'rules' || p -> 'allocations' || p -> 'drafts') e
                  where (e ->> 'turn_id')::uuid not in (select id from public.turns where map_id = mid)) then
@@ -1787,6 +2145,20 @@ begin
                       where a.turn_id = t.id and (a.player_id = p.id or (a.team is not null and a.team <> '' and a.team = p.team)))), '[]'::jsonb),
     'draft', (select jsonb_build_object('changes', d.changes, 'ready', d.ready, 'updated_at', d.updated_at)
                 from public.drafts d where d.turn_id = t.id and d.player_id = p.id),
+    -- Tech tree: the whole tree is public to players; balances and research are their own.
+    'economy', jsonb_build_object('spawn_points', p.spawn_points, 'research_points', p.research_points,
+                                  'tech_unlocked', to_jsonb(p.tech_unlocked), 'income', private.income(p.id)),
+    'tech', coalesce((select jsonb_agg(private.tech_json(x) order by x.tier, x.sort, x.name) from public.tech_items x where x.map_id = p.map_id), '[]'::jsonb),
+    'tech_assets', coalesce((select jsonb_agg(private.asset_json(a)) from public.assets a
+                               where a.id in (select x.asset_id from public.tech_items x where x.map_id = p.map_id)), '[]'::jsonb),
+    'spawn_zones', coalesce((select jsonb_agg(jsonb_build_object('id', z.id, 'name', z.name, 'zone', z.zone) order by z.created_at)
+                               from public.spawn_zones z
+                              where z.map_id = p.map_id
+                                and (z.player_id = p.id or (z.team is not null and z.team = p.team) or (z.player_id is null and z.team is null))), '[]'::jsonb),
+    -- Own units that are spawn points, where they stand now (they may be on a layer this player cannot see).
+    'spawn_points', coalesce((select jsonb_agg(jsonb_build_object('feature_id', f.id, 'center', to_jsonb(private.anchor(f.geometry)), 'radius_m', x.spawn_radius_m, 'name', x.name))
+                                from public.features f join public.tech_items x on x.id::text = f.props ->> 'tech' and x.map_id = f.map_id
+                               where f.map_id = p.map_id and f.owner_player_id = p.id and x.spawn_radius_m is not null), '[]'::jsonb),
     -- Outcome of the most recent pushed turn: what was applied, what was turned down, and the owner's note.
     'last', (select jsonb_build_object('number', pt.number, 'applied', d.ready, 'changes', coalesce(d.owner_changes, d.changes),
                       'edited', d.owner_changes is not null, 'rejected', to_jsonb(d.rejected), 'owner_note', d.owner_note)
@@ -1901,7 +2273,8 @@ end $$;
 alter table public.players add column if not exists pin_set boolean generated always as (pin_hash is not null) stored;
 
 revoke all on public.app_meta, public.maps, public.layers, public.features, public.assets, public.share_links, public.players,
-  public.turns, public.turn_move_rules, public.allocations, public.drafts, public.snapshots, public.activity
+  public.turns, public.turn_move_rules, public.allocations, public.drafts, public.snapshots, public.activity,
+  public.tech_items, public.spawn_zones
   from public, anon, authenticated;
 grant usage on schema public to anon, authenticated;
 grant usage on schema private to authenticated;
@@ -1916,9 +2289,9 @@ do $$
 declare t text;
 begin
   foreach t in array array['app_meta','maps','layers','features','assets','share_links','players','turns','turn_move_rules',
-                           'allocations','drafts','snapshots','activity'] loop
+                           'allocations','drafts','snapshots','activity','tech_items','spawn_zones'] loop
     execute format('alter table public.%I enable row level security', t);
-    if t not in ('app_meta', 'snapshots', 'activity') then
+    if t not in ('app_meta', 'snapshots', 'activity', 'tech_items', 'spawn_zones') then
       execute format('create policy %I on public.%I for all to authenticated using (private.is_admin()) with check (private.is_admin())', t || '_admin', t);
     end if;
   end loop;
@@ -1940,7 +2313,8 @@ begin
         'create_player','update_player','reset_player_invite','set_player_pin','clear_pin_lockout','assign_units','set_team_visibility',
         'open_turn','update_turn','set_move_rule','save_allocation','delete_allocation','lock_turn','unlock_turn','review_draft','push_turn','get_turn',
         'get_snapshot','rollback_to','export_campaign','import_campaign','create_share_link','update_share_link','get_shared_map',
-        'get_settings','set_discord_webhook','test_discord_webhook','claim_invite','get_player_state','get_player_history','save_draft','set_ready']) then
+        'get_settings','set_discord_webhook','test_discord_webhook','claim_invite','get_player_state','get_player_history','save_draft','set_ready',
+        'get_economy','save_tech_item','delete_tech_item','save_spawn_zone','delete_spawn_zone','set_player_points','set_player_tech']) then
       execute 'revoke all on function ' || r.sig || ' from public, anon';
       execute 'grant execute on function ' || r.sig || ' to authenticated';
       if r.proname in ('app_status', 'keepalive', 'get_shared_map') then
@@ -1981,7 +2355,7 @@ exception when others then
   raise notice 'pg_net is not available here; Discord announcements are disabled';
 end $$;
 
-insert into public.app_meta (key, value) values ('schema_version', '3')
+insert into public.app_meta (key, value) values ('schema_version', '4')
 on conflict (key) do update set value = excluded.value, updated_at = now();
 
 commit;

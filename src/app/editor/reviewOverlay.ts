@@ -49,6 +49,10 @@ export class ReviewOverlay {
       out.push({ id, layer_id: GHOST_LAYER, kind, geometry, props, style: { ...DEFAULT_STYLE, ...style }, asset_id: null, z: out.length });
     const colorOf = (playerId: string | null) => s.players.find((p) => p.id === playerId)?.color ?? DEFAULT_COLOR;
 
+    for (const z of b.economy?.zones ?? []) {
+      const color = z.player_id ? colorOf(z.player_id) : z.team ? s.players.find((p) => p.team === z.team)?.color ?? DEFAULT_COLOR : '#ffffff';
+      extra(`spawn~${z.id}`, 'polygon', zonePolygon(z.zone), { name: z.name ?? 'Spawn zone' }, { color, width: 1.5, dash: 'dot', fillOpacity: 0.04 });
+    }
     for (const a of b.allocations) {
       if (!a.zone) continue;
       const color = a.player_id ? colorOf(a.player_id) : s.players.find((p) => p.team === a.team)?.color ?? DEFAULT_COLOR;

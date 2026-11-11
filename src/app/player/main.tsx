@@ -10,12 +10,14 @@ import { symbolDataUrl } from '../lib/images';
 import { createMap } from '../lib/mapview';
 import { cleanHeading, describeChange, dropPart, fmtWhen, MAX_ORDER_LEN, summarize } from '../lib/submissions';
 import { publicAssetUrl } from '../lib/supabase';
+import { costText, fmtPts, isUnlocked, placementText, techStatus } from '../lib/tech';
+import { TechTree } from '../lib/TechTree';
 import { TurnSlider, turnLabel } from '../lib/TurnSlider';
-import type { BasemapId, Feature, PlayerAllocation, Pos, Zone } from '../lib/types';
+import type { BasemapId, Feature, PlayerAllocation, Pos, TechItem, Zone } from '../lib/types';
 import '../styles.css';
 import { announceDraft, closeChannel, fetchHistory, fetchState, join, openChannel, sb, setReady, type JoinResult } from './client';
 import { PlayController } from './controller';
-import { effective, remaining, usePlay, type PTool } from './store';
+import { effective, pointsLeft, remaining, usePlay, type PTool } from './store';
 
 const POLL_MS = 60_000;
 const DRAW_TOOLS: [PTool, string][] = [['select', 'Select / move'], ['arrow', 'Arrow'], ['line', 'Line'], ['polygon', 'Area'], ['text', 'Note']];
@@ -50,6 +52,7 @@ function Game({ token }: { token: string }) {
   const [playerId, setPlayerId] = useState('');
   const [online, setOnline] = useState(false);
   const [basemap, setBase] = useState<BasemapId>('satellite');
+  const [treeOpen, setTreeOpen] = useState(false);
   const state = usePlay((s) => s.state);
   const hint = usePlay((s) => s.hint);
   const viewing = usePlay((s) => s.viewing);
@@ -212,12 +215,14 @@ function Game({ token }: { token: string }) {
           ) : (
             <aside className="ppanel left" aria-label="Your turn">
               <TurnBox refresh={() => refreshRef.current()} announce={() => announceDraft(channel.current)} />
+              <TechBox openTree={() => setTreeOpen(true)} />
               <Tools />
               <DraftList />
               <LastTurn />
             </aside>
           )}
           <Details />
+          {treeOpen && <TechModal onClose={() => setTreeOpen(false)} />}
           {hint && <div className="toast" role="status">{hint}</div>}
           <div className="vfoot mono">
             <span ref={coordEl}>–</span>
@@ -263,7 +268,7 @@ function TurnBox({ refresh, announce }: { refresh: () => Promise<void>; announce
           ? 'The owner is reviewing all drafts. Yours is frozen until the turn is pushed.'
           : turn.frozen
             ? 'The deadline has passed, so your draft can no longer change. You can still mark it ready or not.'
-            : 'Move your units, place reinforcements and give orders. Everything saves by itself. Nobody else sees your draft until the owner pushes the turn.'}
+            : 'Move your units, research, buy and place units, and give orders. Everything saves by itself. Nobody else sees your draft until the owner pushes the turn.'}
       </p>
       {saveStatus === 'error' ? (
         <p className="note bad" role="alert">
@@ -326,9 +331,123 @@ function Tools() {
   );
 }
 
+function techIcon(it: Pick<TechItem, 'asset_id' | 'sidc'>): string | null {
+  const a = usePlay.getState().state?.tech_assets.find((x) => x.id === it.asset_id);
+  return a ? publicAssetUrl(a.path) : it.sidc ? symbolDataUrl(it.sidc, 20) : null;
+}
+
+/** Points, income, and the units this player can buy right now. */
+function TechBox({ openTree }: { openTree(): void }) {
+  const state = usePlay((s) => s.state!);
+  const draft = usePlay((s) => s.draft);
+  const tool = usePlay((s) => s.tool);
+  const buyId = usePlay((s) => s.buyId);
+  const { economy, tech } = state;
+  if (!tech.length && !economy.spawn_points && !economy.research_points) return null;
+  void draft; // re-render when the draft (and so the points left) changes
+  const left = pointsLeft();
+  const editable = !!state.turn && !state.turn.frozen;
+  const buyable = tech.filter((it) => it.buyable && isUnlocked(it, economy.tech_unlocked));
+  const picked = tech.find((x) => x.id === buyId);
+
+  return (
+    <section className="section">
+      <header><h3>Supply and research</h3></header>
+      <p className="points">
+        <span>Spawn <b className={left.spawn < 0 ? 'neg' : ''}>{fmtPts(left.spawn)}</b>{left.spawn !== economy.spawn_points && <small> of {fmtPts(economy.spawn_points)}</small>}</span>
+        <span>Research <b className={left.research < 0 ? 'neg' : ''}>{fmtPts(left.research)}</b>{left.research !== economy.research_points && <small> of {fmtPts(economy.research_points)}</small>}</span>
+      </p>
+      <p className="tip">Income next push: +{fmtPts(economy.income.spawn)} spawn, +{fmtPts(economy.income.research)} research. Points are spent when the owner pushes the turn.</p>
+      <button type="button" className="btn" onClick={openTree}>Tech tree{tech.length ? ` (${tech.filter((x) => isUnlocked(x, economy.tech_unlocked)).length}/${tech.length} unlocked)` : ''}</button>
+      {editable && buyable.length > 0 && (
+        <>
+          <h4>Buy</h4>
+          <ul className="allocs">
+            {buyable.map((it) => (
+              <li key={it.id}>
+                <button type="button" className={`btn${tool === 'buy' && buyId === it.id ? ' on' : ''}`} disabled={left.spawn < it.spawn_cost} onClick={() => usePlay.getState().startBuy(it.id)}>
+                  {techIcon(it) ? <img className="mini" src={techIcon(it)!} alt="" /> : null}
+                  <span><strong>{it.name}</strong><small>{costText(it, 'buy')} · {placementText(it.placement)}</small></span>
+                </button>
+              </li>
+            ))}
+          </ul>
+          {tool === 'buy' && picked && <p className="tip">Click the map to place {picked.name} {placementText(picked.placement)}{picked.placement !== 'anywhere' ? ' (dashed outlines)' : ''}. Esc stops.</p>}
+          {buyable.some((it) => it.placement !== 'anywhere') && !state.spawn_zones.length && !state.spawn_points.length && (
+            <p className="note">You have no spawn zone or spawn-point unit yet, so only units placeable anywhere can be bought.</p>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
+function TechModal({ onClose }: { onClose(): void }) {
+  const state = usePlay((s) => s.state!);
+  const draft = usePlay((s) => s.draft);
+  const [sel, setSel] = useState<string | null>(null);
+  const { economy, tech } = state;
+  const editable = !!state.turn && !state.turn.frozen;
+  const left = pointsLeft();
+  const status = (it: TechItem) => techStatus(it, tech, economy.tech_unlocked, draft);
+  const picked = tech.find((x) => x.id === sel);
+  useEffect(() => {
+    const esc = (e: KeyboardEvent) => e.key === 'Escape' && onClose();
+    window.addEventListener('keydown', esc);
+    return () => window.removeEventListener('keydown', esc);
+  }, [onClose]);
+
+  const footer = (it: TechItem) => {
+    if (!editable) return null;
+    const st = status(it);
+    const stop = (e: React.MouseEvent) => e.stopPropagation();
+    if (st === 'available') {
+      return <button type="button" className="btn sm primary" disabled={left.research < it.research_cost} onClick={(e) => (stop(e), usePlay.getState().put({ op: 'research', feature_id: it.id }))}>Research ({it.research_cost})</button>;
+    }
+    if (st === 'researching') {
+      return <button type="button" className="btn sm" onClick={(e) => (stop(e), usePlay.getState().drop(it.id))}>Cancel research</button>;
+    }
+    if (st === 'unlocked' && it.buyable) {
+      return <button type="button" className="btn sm" disabled={left.spawn < it.spawn_cost} onClick={(e) => (stop(e), usePlay.getState().startBuy(it.id), onClose())}>Buy and place</button>;
+    }
+    return null;
+  };
+
+  return (
+    <div className="modal" role="dialog" aria-modal="true" aria-label="Tech tree" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+      <div className="dialog xwide">
+        <header>
+          <h2>Tech tree</h2>
+          <button type="button" className="ib" aria-label="Close" onClick={onClose}>✕</button>
+        </header>
+        <p className="points">
+          <span>Spawn <b>{fmtPts(left.spawn)}</b></span>
+          <span>Research <b>{fmtPts(left.research)}</b></span>
+          <span>Income +{fmtPts(economy.income.spawn)} / +{fmtPts(economy.income.research)} per turn</span>
+        </p>
+        <TechTree items={tech} icon={techIcon} status={status} selected={sel} onPick={(it) => setSel(it.id)} footer={footer} />
+        {picked && (
+          <div className="quote">
+            <strong>{picked.name}</strong>
+            {picked.description ? `\n${picked.description}` : ''}
+            {picked.prereqs.length ? `\nRequires: ${picked.prereqs.map((id) => tech.find((x) => x.id === id)?.name ?? '?').join(', ')}` : ''}
+            {picked.buyable ? `\nPlaced ${placementText(picked.placement)}.` : '\nResearch only: unlocks what comes after it.'}
+          </div>
+        )}
+        <p className="tip">
+          {editable
+            ? 'Research is added to your draft and completes when the owner pushes the turn, so a new unlock can be used from the next turn. Purchases are placed on the map like any unit.'
+            : 'The turn is not open for orders, so nothing can be researched or bought right now.'}
+        </p>
+      </div>
+    </div>
+  );
+}
+
 function DraftList() {
   const draft = usePlay((s) => s.draft);
   const features = usePlay((s) => s.state!.features);
+  const tech = usePlay((s) => s.state!.tech);
   const sel = usePlay((s) => s.sel);
   const editable = usePlay((s) => !!s.state?.turn && !s.state.turn.frozen);
   const live = useMemo(() => new Map(features.map((f) => [f.id, f])), [features]);
@@ -342,8 +461,8 @@ function DraftList() {
           {draft.map((c) => (
             <li key={c.feature_id} className={sel === c.feature_id ? 'on' : ''}>
               <div className="row">
-                <span role="button" tabIndex={0} onClick={() => usePlay.setState({ sel: c.feature_id, tool: 'select' })} onKeyDown={(e) => e.key === 'Enter' && usePlay.setState({ sel: c.feature_id, tool: 'select' })}>
-                  {describeChange(c, live)}
+                <span role="button" tabIndex={0} onClick={() => c.op !== 'research' && usePlay.setState({ sel: c.feature_id, tool: 'select' })} onKeyDown={(e) => e.key === 'Enter' && c.op !== 'research' && usePlay.setState({ sel: c.feature_id, tool: 'select' })}>
+                  {describeChange(c, live, tech)}
                 </span>
                 {editable && <button type="button" className="ib" title="Take this out of the draft" aria-label="Take this out of the draft" onClick={() => usePlay.getState().drop(c.feature_id)}>✕</button>}
               </div>
@@ -358,6 +477,7 @@ function DraftList() {
 function LastTurn() {
   const last = usePlay((s) => s.state!.last);
   const features = usePlay((s) => s.state!.features);
+  const tech = usePlay((s) => s.state!.tech);
   const live = useMemo(() => new Map(features.map((f) => [f.id, f])), [features]);
   if (!last) return null;
   const rejected = last.changes.filter((c) => last.rejected.includes(c.feature_id));
@@ -371,7 +491,7 @@ function LastTurn() {
       </p>
       {last.applied && rejected.length > 0 && (
         <ul className="changes">
-          {rejected.map((c) => <li key={c.feature_id} className="off"><div className="row"><span><span className="tag bad">rejected</span> {describeChange(c, live)}</span></div></li>)}
+          {rejected.map((c) => <li key={c.feature_id} className="off"><div className="row"><span><span className="tag bad">rejected</span> {describeChange(c, live, tech)}</span></div></li>)}
         </ul>
       )}
       {last.owner_note && <p className="quote">Owner: {last.owner_note}</p>}

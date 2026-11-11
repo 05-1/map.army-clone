@@ -33,6 +33,8 @@ export interface Props {
   radius?: number;
   /** text */
   fontSize?: number;
+  /** Tech item this unit is (bought from the tree, or tagged by the owner): pays income, may be a spawn point. */
+  tech?: string;
 }
 
 export interface Feature {
@@ -143,8 +145,10 @@ export interface CreatePayload {
   props?: Props;
   style?: Partial<Style>;
   asset_id?: string | null;
-  /** Units (symbols and graphics) are placed out of an allocation. Drawings have none. */
+  /** Units (symbols and graphics) are placed out of an allocation, or bought from the tech tree. Drawings have neither. */
   allocation_id?: string | null;
+  /** Tech item bought with spawn points. */
+  purchase_id?: string | null;
 }
 
 /** The only things a draft may change on an existing unit. */
@@ -158,7 +162,9 @@ export interface UpdatePayload {
 export type Change =
   | { op: 'create'; feature_id: string; payload: CreatePayload }
   | { op: 'update'; feature_id: string; payload: UpdatePayload }
-  | { op: 'delete'; feature_id: string; payload?: Record<string, never> };
+  | { op: 'delete'; feature_id: string; payload?: Record<string, never> }
+  /** Research a tech item. feature_id is the item's id. */
+  | { op: 'research'; feature_id: string; payload?: Record<string, never> };
 
 export interface HistoryEntry {
   number: number;
@@ -211,12 +217,71 @@ export interface Draft {
   updated_at: string;
 }
 
+// ---------------------------------------------------------------------------
+// Tech tree and points
+// ---------------------------------------------------------------------------
+
+/** spawn: near the player's own spawn-point units; zone: inside a spawn zone; either; anywhere. */
+export type Placement = 'spawn' | 'zone' | 'either' | 'anywhere';
+
+export interface TechItem {
+  id: string;
+  name: string;
+  description: string | null;
+  /** Column in the tree, left to right. */
+  tier: number;
+  sort: number;
+  /** 0 = available from the start. */
+  research_cost: number;
+  spawn_cost: number;
+  prereqs: string[];
+  /** Can be bought as a unit. A pure research node is not. */
+  buyable: boolean;
+  asset_id: string | null;
+  sidc: string | null;
+  props: Props;
+  income_spawn: number;
+  income_research: number;
+  /** Metres. Set = units of this type are spawn points. */
+  spawn_radius_m: number | null;
+  placement: Placement;
+}
+
+export interface SpawnZone {
+  id: string;
+  name: string | null;
+  player_id: string | null;
+  team: string | null;
+  zone: Exclude<Zone, null>;
+}
+
+export interface Income {
+  spawn: number;
+  research: number;
+}
+
+export interface PlayerEconomy {
+  id: string;
+  spawn_points: number;
+  research_points: number;
+  tech_unlocked: string[];
+  income: Income;
+}
+
+/** What get_economy() returns to an admin (also inside get_turn). */
+export interface Economy {
+  items: TechItem[];
+  zones: SpawnZone[];
+  players: PlayerEconomy[];
+}
+
 /** What get_turn() returns to an admin. */
 export interface TurnBundle {
   turn: Turn | null;
   rules: MoveRule[];
   allocations: Allocation[];
   drafts: Draft[];
+  economy: Economy;
   history: HistoryEntry[];
   server_time: string;
 }
@@ -245,6 +310,14 @@ export interface PlayerState {
   allocations: PlayerAllocation[];
   allocation_assets: Asset[];
   draft: { changes: Change[]; ready: boolean; updated_at: string } | null;
+  economy: Omit<PlayerEconomy, 'id'>;
+  /** The whole tech tree of the map. */
+  tech: TechItem[];
+  tech_assets: Asset[];
+  /** Spawn zones that apply to this player. */
+  spawn_zones: Pick<SpawnZone, 'id' | 'name' | 'zone'>[];
+  /** This player's own units that are spawn points, where they stand now. */
+  spawn_points: { feature_id: string; center: Pos; radius_m: number; name: string }[];
   /** Outcome of the most recent pushed turn. */
   last: { number: number; applied: boolean; changes: Change[]; edited: boolean; rejected: string[]; owner_note: string | null } | null;
 }
