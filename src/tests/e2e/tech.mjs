@@ -63,7 +63,9 @@ await step('owner builds the tree in the Tech dialog', async () => {
   await dlg.locator('.flowgrow', { hasText: '→' }).click(); await wait(ed, 900);
   await field('Name').fill('Tank'); await field('Research cost').fill('10'); await field('Spawn cost per unit').fill('15');
   await field('Where players may place it').selectOption('spawn');
+  await field('Move range per turn').fill('35');
   await save();
+  check('move range per type is set in the tree', (await sql(`select move_range_m from public.tech_items where name = 'Tank'`))[0]?.move_range_m === 35000);
   // Radar: research only, grown below Depot, then linked to Tank by dragging its dot onto Tank.
   await box('Depot').click(); await wait(ed, 300);
   await dlg.locator('.flowgrow', { hasText: '↓' }).click(); await wait(ed, 900);

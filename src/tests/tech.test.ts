@@ -272,4 +272,24 @@ describe('tech tree', () => {
     await rpc(OWNER, 'delete_tech_item', id.barracks);
     expect((await rpc(OWNER, 'get_economy', id.map)).items.find((x: Row) => x.id === id.rifle).spawn_from).toEqual([]);
   });
+
+  it('movement range per unit type comes from the tech tree; a per-unit override still wins', async () => {
+    id.scout = await item({ name: 'Scouts', spawn_cost: 1, sidc: 'SFGPUCR----F---', placement: 'anywhere', move_range_m: 1000 });
+    const b = buy(id.scout, 70, 10);
+    await save(A1, id.p1, [b]);
+    await push();
+    const t = await turn();
+    await rpc(OWNER, 'update_turn', t.id, J({ default_radius_m: 100000 }));
+    expect((await state(A1, id.p1)).radii[b.feature_id]).toBe(1000);
+    const go = (km: number) => ({ op: 'update', feature_id: b.feature_id, payload: { geometry: pt(70, 10 + km / 111.2) } });
+    await expect(save(A1, id.p1, [go(2)])).rejects.toThrow(/beyond the range of this unit \(1000 m\)/);
+    expect((await save(A1, id.p1, [go(0.5)])).count).toBe(1);
+    await rpc(OWNER, 'set_move_rule', t.id, b.feature_id, null, 5000);
+    expect((await save(A1, id.p1, [go(2)])).count).toBe(1);
+    await rpc(OWNER, 'set_move_rule', t.id, b.feature_id, null, null);
+    // Blank range = the turn's default.
+    await item({ id: id.scout, name: 'Scouts', spawn_cost: 1, sidc: 'SFGPUCR----F---', placement: 'anywhere', move_range_m: null });
+    expect((await state(A1, id.p1)).radii[b.feature_id]).toBe(100000);
+    await save(A1, id.p1, []);
+  });
 });

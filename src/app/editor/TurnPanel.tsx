@@ -165,14 +165,13 @@ function MoveRules({ backend, turn, act }: { backend: Backend; turn: Turn; act: 
   const assets = useEd((s) => s.assets);
   const selection = useEd((s) => s.selection);
   const [radius, setRadius] = useState('');
-  const [assetId, setAssetId] = useState('');
   const byId = useMemo(() => new Map(features.map((f) => [f.id, f])), [features]);
   const r = toM(radius);
 
   return (
     <Section title="Move overrides">
       {rules.length === 0 ? (
-        <p className="empty">Every unit uses the turn's move radius. Add an override for single units or for a type of graphic.</p>
+        <p className="empty">Every unit uses its tech type's range, or the turn's move radius. Add an override for single units, e.g. 0 to pin one in place.</p>
       ) : (
         <ul className="changes">
           {rules.map((x) => (
@@ -197,13 +196,10 @@ function MoveRules({ backend, turn, act }: { backend: Backend; turn: Turn; act: 
       >
         Apply to {selection.length || 'the'} selected unit{selection.length === 1 ? '' : 's'}
       </button>
-      <div className="row2">
-        <select value={assetId} onChange={(e) => setAssetId(e.target.value)} aria-label="Graphic type">
-          <option value="">Graphic type…</option>
-          {assets.filter((a) => !a.deleted_at).map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
-        </select>
-        <button type="button" className="btn sm" disabled={r == null || !assetId} onClick={() => void act(() => backend.setMoveRule(turn.id, { asset_id: assetId }, r))}>Apply to type</button>
-      </div>
+      <p className="tip">
+        Range per unit type is set in Tech &gt; Tech tree ("Move range per turn") and applies to every unit of that type. An override
+        here for one unit wins over it; units with no tech type use the turn's move radius.
+      </p>
     </Section>
   );
 }

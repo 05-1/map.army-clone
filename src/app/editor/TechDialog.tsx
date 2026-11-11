@@ -81,7 +81,7 @@ type Run = (fn: () => Promise<unknown>) => Promise<boolean>;
 const BLANK: TechItem = {
   id: '', name: '', description: null, tier: 0, sort: 0, research_cost: 10, spawn_cost: 10, prereqs: [], buyable: true,
   asset_id: null, sidc: null, props: {}, income_spawn: 0, income_research: 0, spawn_radius_m: null, placement: 'either', pos_x: null, pos_y: null,
-  category: 'unit', can_move: true, spawn_from: [],
+  category: 'unit', can_move: true, spawn_from: [], move_range_m: null,
 };
 /** A production building: players build it with spawn points, it stays put, and units are placed around it. */
 const BUILDING: Partial<TechItem> = { category: 'building', can_move: false, buyable: true, spawn_radius_m: 5000, placement: 'zone', spawn_cost: 50, research_cost: 0 };
@@ -275,6 +275,14 @@ function TreeTab({ backend, map, busy, run }: { backend: Backend; map: MapMeta; 
             <input type="checkbox" checked={edit.can_move} onChange={(e) => set({ can_move: e.target.checked })} />
             Players can move it once placed
           </label>
+          {edit.can_move && (
+            <Field label="Move range per turn (km, blank = the turn's move radius)" wide>
+              <input
+                type="number" min={0} step="any" value={edit.move_range_m != null ? +(edit.move_range_m / 1000).toFixed(3) : ''}
+                onChange={(e) => set({ move_range_m: e.target.value === '' ? null : Math.max(0, +e.target.value) * 1000 })}
+              />
+            </Field>
+          )}
           <div className="row2 wrap">
             <button type="button" className="btn primary" disabled={busy || !edit.name.trim() || (edit.buyable && !edit.sidc && !edit.asset_id)} onClick={save}>Save</button>
             <button type="button" className="btn" onClick={() => setEdit(null)}>Close</button>

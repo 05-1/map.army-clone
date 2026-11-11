@@ -234,6 +234,9 @@ export function TechTree({ items, icon, status, selected, onPick, footer, edit }
                     {it.buyable ? ` · ${it.category === 'building' ? 'Build' : 'Buy'} ${costText(it, 'buy')}` : ' · research only'}
                   </small>
                   {it.spawn_from.length > 0 && <small>Made at {it.spawn_from.map((id) => items.find((x) => x.id === id)?.name).filter(Boolean).join(', ')}</small>}
+                  {(!it.can_move || it.move_range_m != null) && (
+                    <small>{!it.can_move ? 'Cannot move' : it.move_range_m ? `Moves ${+(it.move_range_m / 1000).toFixed(2)} km/turn` : 'Cannot move'}</small>
+                  )}
                   {(it.income_spawn > 0 || it.income_research > 0 || !!it.spawn_radius_m) && (
                     <small className="perks">
                       {it.income_spawn > 0 && `+${it.income_spawn} spawn/turn `}

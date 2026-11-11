@@ -290,6 +290,7 @@ create table if not exists public.tech_items (
   category        text not null default 'unit' check (category in ('unit', 'building')),  -- a building usually produces units
   can_move        boolean not null default true,                                  -- false: players cannot move it once placed
   spawn_from      uuid[] not null default '{}',                                   -- buildings that produce this unit (empty = any spawn point)
+  move_range_m    double precision check (move_range_m is null or move_range_m >= 0),  -- per turn; null = the turn's default
   created_at      timestamptz not null default now(),
   check (asset_id is null or sidc is null),
   check (not buyable or asset_id is not null or sidc is not null)
@@ -300,7 +301,8 @@ alter table public.tech_items
   add column if not exists pos_y double precision,
   add column if not exists category text not null default 'unit' check (category in ('unit', 'building')),
   add column if not exists can_move boolean not null default true,
-  add column if not exists spawn_from uuid[] not null default '{}';
+  add column if not exists spawn_from uuid[] not null default '{}',
+  add column if not exists move_range_m double precision check (move_range_m is null or move_range_m >= 0);
 
 -- Areas where bought units may be placed: for one player, a team, or (both null) everyone on the map.
 create table if not exists public.spawn_zones (
@@ -687,12 +689,15 @@ as $$
   end;
 $$;
 
--- How far a unit may move this turn. Most specific rule wins; null means no limit.
-create function private.radius_for(p_turn_id uuid, p_default float8, p_feature_id uuid, p_asset_id uuid) returns float8
+-- How far a unit may move this turn; null means no limit. Most specific first: an override for this
+-- one unit (turn panel), then its tech item (a building that cannot move = 0, else the item's range),
+-- then an older per-graphic override, then the turn's default.
+create function private.radius_for(p_turn_id uuid, p_default float8, p_feature_id uuid, p_asset_id uuid, p_tech text default null) returns float8
 language sql stable set search_path = ''
 as $$
   select coalesce(
     (select r.radius_m from public.turn_move_rules r where r.turn_id = p_turn_id and r.feature_id = p_feature_id),
+    (select case when not x.can_move then 0 else x.move_range_m end from public.tech_items x where x.id::text = p_tech),
     (select r.radius_m from public.turn_move_rules r where r.turn_id = p_turn_id and r.asset_id = p_asset_id),
     p_default);
 $$;
@@ -875,7 +880,7 @@ begin
       end if;
       -- Measured from where the unit is on the live map, i.e. where it started the turn.
       if strict and j ? 'geometry' then
-        r := private.radius_for(t.id, t.default_radius_m, f.id, f.asset_id);
+        r := private.radius_for(t.id, t.default_radius_m, f.id, f.asset_id, f.props ->> 'tech');
         if r is not null and private.dist_m(private.anchor(f.geometry), private.anchor(j -> 'geometry')) > r * 1.001 + 1 then
           raise exception 'move is beyond the range of this unit (% m)', round(r) using errcode = '42501';
         end if;
@@ -1878,20 +1883,20 @@ begin
   end if;
   insert into public.tech_items (id, map_id, name, description, tier, sort, research_cost, spawn_cost, prereqs, buyable,
                                  asset_id, sidc, props, income_spawn, income_research, spawn_radius_m, placement, pos_x, pos_y,
-                                 category, can_move, spawn_from)
+                                 category, can_move, spawn_from, move_range_m)
   values (tid, p_map_id, trim(p ->> 'name'), nullif(trim(p ->> 'description'), ''), coalesce((p ->> 'tier')::integer, 1),
           coalesce((p ->> 'sort')::integer, 0), coalesce((p ->> 'research_cost')::integer, 0), coalesce((p ->> 'spawn_cost')::integer, 0),
           pre, coalesce((p ->> 'buyable')::boolean, true), asset, case when asset is null then nullif(p ->> 'sidc', '') end, props,
           coalesce((p ->> 'income_spawn')::integer, 0), coalesce((p ->> 'income_research')::integer, 0),
           nullif((p ->> 'spawn_radius_m')::float8, 0), coalesce(p ->> 'placement', 'either'),
           (p ->> 'pos_x')::float8, (p ->> 'pos_y')::float8,
-          coalesce(p ->> 'category', 'unit'), coalesce((p ->> 'can_move')::boolean, true), sfrom)
+          coalesce(p ->> 'category', 'unit'), coalesce((p ->> 'can_move')::boolean, true), sfrom, (p ->> 'move_range_m')::float8)
   on conflict (id) do update set name = excluded.name, description = excluded.description, tier = excluded.tier, sort = excluded.sort,
     research_cost = excluded.research_cost, spawn_cost = excluded.spawn_cost, prereqs = excluded.prereqs, buyable = excluded.buyable,
     asset_id = excluded.asset_id, sidc = excluded.sidc, props = excluded.props, income_spawn = excluded.income_spawn,
     income_research = excluded.income_research, spawn_radius_m = excluded.spawn_radius_m, placement = excluded.placement,
     pos_x = coalesce(excluded.pos_x, public.tech_items.pos_x), pos_y = coalesce(excluded.pos_y, public.tech_items.pos_y),
-    category = excluded.category, can_move = excluded.can_move, spawn_from = excluded.spawn_from;
+    category = excluded.category, can_move = excluded.can_move, spawn_from = excluded.spawn_from, move_range_m = excluded.move_range_m;
   -- No loops: an item may not (indirectly) require itself.
   if exists (
     with recursive up (id) as (
@@ -2196,9 +2201,7 @@ begin
     'history', private.history(p.map_id),
     'mine', coalesce((select jsonb_agg(f.id) from public.features f where f.map_id = p.map_id and f.owner_player_id = p.id), '[]'::jsonb),
     -- Movement range per own unit, in metres. Absent or null means unlimited.
-    'radii', coalesce((select jsonb_object_agg(f.id, case
-                           when exists (select 1 from public.tech_items x where x.id::text = f.props ->> 'tech' and x.map_id = f.map_id and not x.can_move) then 0
-                           else private.radius_for(t.id, t.default_radius_m, f.id, f.asset_id) end)
+    'radii', coalesce((select jsonb_object_agg(f.id, private.radius_for(t.id, t.default_radius_m, f.id, f.asset_id, f.props ->> 'tech'))
                          from public.features f where f.map_id = p.map_id and f.owner_player_id = p.id and t.id is not null), '{}'::jsonb),
     'allocations', coalesce((
       select jsonb_agg(jsonb_build_object('id', a.id, 'asset_id', a.asset_id, 'sidc', a.sidc, 'props', a.props, 'quantity', a.quantity,
@@ -2423,7 +2426,7 @@ exception when others then
   raise notice 'pg_net is not available here; Discord announcements are disabled';
 end $$;
 
-insert into public.app_meta (key, value) values ('schema_version', '5')
+insert into public.app_meta (key, value) values ('schema_version', '6')
 on conflict (key) do update set value = excluded.value, updated_at = now();
 
 commit;

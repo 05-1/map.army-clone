@@ -60,7 +60,7 @@ That is the last time you need Supabase or GitHub to run a game.
 Players can buy their own reinforcements instead of you allocating them.
 
 - **Tech** (top bar) > **Tech tree** is a flowchart. "New item" or "New building" adds a box; drag boxes anywhere. Click a box and use its arrow buttons (→+ ↓+ ←+ ↑+) to add a new item in that direction that requires it. Drag one of a box's blue dots onto another box to make that one require it; select a box and click ✕ on an arrow to remove the link. − / + / Fit zoom, drag the background to pan.
-- Each item has a research cost (0 = available from the start), prerequisites, and, if players can buy it, a unit (NATO symbol or graphic) and a spawn cost. An item can also pay **income** (spawn and/or research points per turn for every unit of it on the map) and be a **spawn point** (bought units may be placed within its radius).
+- Each item has a research cost (0 = available from the start), a **move range per turn** for its units (blank = the turn's move radius; a per-unit override in the Turn panel still wins), prerequisites, and, if players can buy it, a unit (NATO symbol or graphic) and a spawn cost. An item can also pay **income** (spawn and/or research points per turn for every unit of it on the map) and be a **spawn point** (bought units may be placed within its radius).
 - **Production buildings** ("New building", or the Kind switch on any item): players build them with spawn points at the cost you set, they cannot be moved once placed (untick "Players can move it once placed" to allow it), and units are placed within their radius. For a unit, "Produced at" limits it to certain buildings (a tank only at a Factory); tick nothing to allow any spawn point. A box grown from a building is a unit made there.
 - **Where bought units and buildings may go**, per item: near one of the player's own spawn points, inside a spawn zone, either, or anywhere.
 - **Tech > Spawn zones**: add a whole **country** (type its name), or click "Draw a zone on the map", draw a polygon or circle, and the window comes back to add it. Each zone is for one player, a team or everyone; rename or reassign it in the list. Zones show on your map as dotted outlines.
@@ -121,7 +121,8 @@ Nothing in this table needs Supabase or GitHub. Each control calls a database fu
 | **Turns** | | |
 | Open a turn | Turn > Open turn | `open_turn` |
 | Deadline, extend deadline, move radius, conflict distance, carry-over | Turn > Turn settings | `update_turn` |
-| Move override per unit or per graphic type | Turn > Move overrides | `set_move_rule` |
+| Move range per unit type | Tech > Tech tree > an item > Move range per turn | `save_tech_item` |
+| Move override for single units (e.g. 0 pins a unit) | Turn > Move overrides | `set_move_rule` |
 | Reinforcements per player or team, with a zone drawn on the map | Turn > Reinforcements | `save_allocation`, `delete_allocation` |
 | Lock, unlock | Turn > Lock for review / Unlock | `lock_turn`, `unlock_turn` |
 | Accept or reject single changes, edit a draft, clear it, mark it ready for a player, note per player | Turn > Drafts > a player | `review_draft` |
