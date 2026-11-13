@@ -27,35 +27,71 @@ export const isUnlocked = (it: TechItem, unlocked: readonly string[]) => it.rese
 export const usable = (it: TechItem, unlocked: readonly string[], draft: readonly Change[]) =>
   isUnlocked(it, unlocked) || draft.some((c) => c.op === 'research' && c.feature_id === it.id);
 
-/** Draft without a research and without anything bought from it (unless it was researched earlier). */
+const researching = (draft: readonly Change[], id: string) => draft.some((c) => c.op === 'research' && c.feature_id === id);
+
+/**
+ * Items that stop being reachable once `gone` are taken out of a draft: research that needed them
+ * (and so on down the chain) unless already done in an earlier turn.
+ */
+function dependents(changes: readonly Change[], gone: ReadonlySet<string>, unlocked: readonly string[], items: readonly TechItem[]): Set<string> {
+  const out = new Set(gone);
+  for (let grew = true; grew; ) {
+    grew = false;
+    for (const c of changes) {
+      if (c.op !== 'research' || out.has(c.feature_id) || unlocked.includes(c.feature_id)) continue;
+      if (items.find((x) => x.id === c.feature_id)?.prereqs.some((p) => out.has(p) && !unlocked.includes(p))) {
+        out.add(c.feature_id);
+        grew = true;
+      }
+    }
+  }
+  return out;
+}
+
+/** Draft without a research, without research that needed it, and without anything bought from those (unless researched earlier). */
 export function withoutResearch(draft: readonly Change[], itemId: string, unlocked: readonly string[], items: readonly TechItem[]): Change[] {
-  const it = items.find((x) => x.id === itemId);
-  const keepBuys = !!it && isUnlocked(it, unlocked);
-  return draft.filter((c) => c.feature_id !== itemId && (keepBuys || !(c.op === 'create' && c.payload.purchase_id === itemId)));
+  const gone = dependents(draft, new Set([itemId]), unlocked, items);
+  const free = (id: string) => { const it = items.find((x) => x.id === id); return !!it && isUnlocked(it, unlocked); };
+  return draft.filter((c) => !(c.op === 'research' && gone.has(c.feature_id)) && !(c.op === 'create' && c.payload.purchase_id && gone.has(c.payload.purchase_id) && !free(c.payload.purchase_id)));
 }
 
 /**
- * Review: rejecting a research also rejects what the draft buys from it (the push would refuse those),
- * and accepting such a purchase accepts its research again.
+ * Review: rejecting a research also rejects the research and purchases that depend on it (the push
+ * would refuse them), and accepting a change accepts the research it needs again.
  */
-export function toggleRejected(changes: readonly Change[], rejected: readonly string[], id: string): string[] {
+export function toggleRejected(changes: readonly Change[], rejected: readonly string[], id: string, items: readonly TechItem[] = [], unlocked: readonly string[] = []): string[] {
   const out = new Set(rejected);
   const c = changes.find((x) => x.feature_id === id);
+  const inDraft = (itemId: string) => changes.some((x) => x.op === 'research' && x.feature_id === itemId);
   if (out.has(id)) {
     out.delete(id);
-    const research = c?.op === 'create' && c.payload.purchase_id ? changes.find((x) => x.op === 'research' && x.feature_id === c.payload.purchase_id) : undefined;
-    if (research) out.delete(research.feature_id);
+    // Walk back up: the item this needs, and that item's prerequisites, if they are researched in this draft.
+    const need = [c?.op === 'research' ? id : c?.op === 'create' ? c.payload.purchase_id ?? '' : ''];
+    while (need.length) {
+      const next = need.pop()!;
+      if (inDraft(next)) out.delete(next);
+      const it = items.find((x) => x.id === next);
+      if (!it) continue;
+      for (const p of it.prereqs) if (inDraft(p) && out.has(p)) need.push(p);
+    }
   } else {
     out.add(id);
-    if (c?.op === 'research') for (const x of changes) if (x.op === 'create' && x.payload.purchase_id === id) out.add(x.feature_id);
+    if (c?.op === 'research') {
+      const gone = dependents(changes, new Set([id]), unlocked, items);
+      for (const x of changes) {
+        if (x.op === 'research' && gone.has(x.feature_id)) out.add(x.feature_id);
+        if (x.op === 'create' && x.payload.purchase_id && gone.has(x.payload.purchase_id) && !unlocked.includes(x.payload.purchase_id)) out.add(x.feature_id);
+      }
+    }
   }
   return [...out];
 }
 
-export function prereqsMet(it: TechItem, items: readonly TechItem[], unlocked: readonly string[]): boolean {
+/** Every prerequisite researched, earlier or in this draft. One the player cannot see (not released yet) is not. */
+export function prereqsMet(it: TechItem, items: readonly TechItem[], unlocked: readonly string[], draft: readonly Change[] = []): boolean {
   return it.prereqs.every((id) => {
     const p = items.find((x) => x.id === id);
-    return !p || isUnlocked(p, unlocked);
+    return !!p && (isUnlocked(p, unlocked) || researching(draft, id));
   });
 }
 
@@ -64,8 +100,8 @@ export type TechStatus = 'unlocked' | 'researching' | 'available' | 'locked';
 /** unlocked: usable now. researching: in this draft. available: can be researched. locked: prerequisites missing. */
 export function techStatus(it: TechItem, items: readonly TechItem[], unlocked: readonly string[], draft: readonly Change[]): TechStatus {
   if (isUnlocked(it, unlocked)) return 'unlocked';
-  if (draft.some((c) => c.op === 'research' && c.feature_id === it.id)) return 'researching';
-  return prereqsMet(it, items, unlocked) ? 'available' : 'locked';
+  if (researching(draft, it.id)) return 'researching';
+  return prereqsMet(it, items, unlocked, draft) ? 'available' : 'locked';
 }
 
 /** Points a draft spends: spawn points on purchases, research points on research. Rejected changes are free. */

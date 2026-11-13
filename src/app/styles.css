@@ -216,8 +216,12 @@ input:disabled, select:disabled { opacity: 0.45; }
 .changes .row > span[role='button'] { cursor: pointer; }
 @media (max-width: 720px) {
   .ppanel { top: auto; bottom: 34px; max-height: 45%; width: calc(100% - 20px); }
-  .play .details { top: 110px; }
+  /* On a phone the details open as a sheet over the panel, keeping the map free to tap. */
+  .play .details { top: auto; bottom: 34px; max-height: 45%; width: calc(100% - 20px); right: 10px; z-index: 6; }
+  .measurebox, .measurebox.right { top: auto; bottom: 34px; left: 10px; right: 10px; width: auto; z-index: 7; }
 }
+.ppanel .panelhide { position: sticky; top: 6px; float: right; margin: 6px 6px 0 0; z-index: 2; }
+.panelshow { position: absolute; left: 10px; bottom: 44px; z-index: 5; }
 .subs.done .btn { justify-self: start; }
 
 /* ---------- turns, setup, manage ---------- */
@@ -318,3 +322,16 @@ input:disabled, select:disabled { opacity: 0.45; }
 .zonerow > span { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .zonerow .inline-name { width: auto; flex: 1; min-width: 0; }
 .zonerow small { color: var(--mute); white-space: nowrap; }
+.tag.rel { margin: 0 4px 0 0; }
+
+/* ---------- measuring ---------- */
+.measurelabel { padding: 2px 7px; border-radius: 5px; background: #ffd60a; color: #1a1500; font: 600 12px var(--mono); white-space: nowrap; pointer-events: none; box-shadow: 0 1px 4px #0008; }
+.measurepanel { display: flex; flex-direction: column; gap: 8px; }
+.measureread { font-size: 15px; color: #ffd60a; margin: 0; min-height: 20px; }
+.measurebox { position: absolute; top: 64px; left: 10px; width: min(300px, calc(100% - 20px)); padding: 10px; background: #14191ff2; border: 1px solid var(--line); border-radius: 9px; z-index: 5; }
+.measurebox.right { left: auto; right: 10px; }
+@media (pointer: coarse) {
+  .play .btn, .play .btn.sm, .viewer .btn.sm { min-height: 36px; }
+  .play .ib { width: 34px; height: 34px; }
+  .play input[type='range'] { height: 28px; }
+}

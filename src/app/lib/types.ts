@@ -251,6 +251,10 @@ export interface TechItem {
   can_move: boolean;
   /** Buildings that produce this unit; empty = any of the player's spawn points. */
   spawn_from: string[];
+  /** How far units of this type may move each turn, in metres; null = the turn's default. */
+  move_range_m: number | null;
+  /** Players do not see it, and cannot research it, before this turn. Null = from the start. */
+  release_turn: number | null;
   /** Place in the flowchart; null = laid out by tier. */
   pos_x: number | null;
   pos_y: number | null;

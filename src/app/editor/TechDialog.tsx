@@ -81,7 +81,7 @@ type Run = (fn: () => Promise<unknown>) => Promise<boolean>;
 const BLANK: TechItem = {
   id: '', name: '', description: null, tier: 0, sort: 0, research_cost: 10, spawn_cost: 10, prereqs: [], buyable: true,
   asset_id: null, sidc: null, props: {}, income_spawn: 0, income_research: 0, spawn_radius_m: null, placement: 'either', pos_x: null, pos_y: null,
-  category: 'unit', can_move: true, spawn_from: [],
+  category: 'unit', can_move: true, spawn_from: [], move_range_m: null, release_turn: null,
 };
 /** A production building: players build it with spawn points, it stays put, and units are placed around it. */
 const BUILDING: Partial<TechItem> = { category: 'building', can_move: false, buyable: true, spawn_radius_m: 5000, placement: 'zone', spawn_cost: 50, research_cost: 0 };
@@ -94,6 +94,7 @@ const body = (it: TechItem) => {
 
 function TreeTab({ backend, map, busy, run }: { backend: Backend; map: MapMeta; busy: boolean; run: Run }) {
   const items = useEd((s) => s.bundle?.economy.items ?? []);
+  const turnNo = useEd((s) => s.bundle?.turn?.number ?? null);
   const assets = useEd((s) => s.assets);
   const symbolDraft = useEd((s) => s.symbolDraft);
   const [edit, setEdit] = useState<TechItem | null>(null);
@@ -189,6 +190,10 @@ function TreeTab({ backend, map, busy, run }: { backend: Backend; map: MapMeta; 
           <Field label="Description (players see it)" wide>
             <textarea rows={2} maxLength={1000} value={edit.description ?? ''} onChange={(e) => set({ description: e.target.value })} />
           </Field>
+          <Field label={`Released on turn (blank = from the start${turnNo ? `; now turn ${turnNo}` : ''})`} wide>
+            <input type="number" min={1} step={1} value={edit.release_turn ?? ''} placeholder="e.g. 5"
+              onChange={(e) => set({ release_turn: e.target.value === '' ? null : Math.max(1, Math.round(+e.target.value)) })} />
+          </Field>
           <div className="row2">
             <Field label="Research cost (0 = free)"><input type="number" min={0} value={edit.research_cost} onChange={(e) => set({ research_cost: int(e.target.value) })} /></Field>
             <Field label="Spawn cost per unit"><input type="number" min={0} value={edit.spawn_cost} disabled={!edit.buyable} onChange={(e) => set({ spawn_cost: int(e.target.value) })} /></Field>
@@ -275,6 +280,14 @@ function TreeTab({ backend, map, busy, run }: { backend: Backend; map: MapMeta; 
             <input type="checkbox" checked={edit.can_move} onChange={(e) => set({ can_move: e.target.checked })} />
             Players can move it once placed
           </label>
+          {edit.can_move && (
+            <Field label="Move range per turn (km, blank = the turn's move radius)" wide>
+              <input
+                type="number" min={0} step="any" value={edit.move_range_m != null ? +(edit.move_range_m / 1000).toFixed(3) : ''}
+                onChange={(e) => set({ move_range_m: e.target.value === '' ? null : Math.max(0, +e.target.value) * 1000 })}
+              />
+            </Field>
+          )}
           <div className="row2 wrap">
             <button type="button" className="btn primary" disabled={busy || !edit.name.trim() || (edit.buyable && !edit.sidc && !edit.asset_id)} onClick={save}>Save</button>
             <button type="button" className="btn" onClick={() => setEdit(null)}>Close</button>

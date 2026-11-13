@@ -4,6 +4,10 @@ import { BASEMAP_IDS, BASEMAPS, setBasemap } from '../lib/basemaps';
 import { fmtLatLon } from '../lib/geo';
 import { createMap } from '../lib/mapview';
 import { SceneRenderer } from '../lib/scene';
+import { Measure, type MeasureState } from '../lib/measure';
+import { MEASURE_IDLE, MeasurePanel } from '../lib/MeasurePanel';
+import { ExportDialog } from '../lib/ExportDialog';
+import { attributionText } from '../lib/exportmap';
 import { effectiveChanges } from '../lib/submissions';
 import { TurnSlider, turnLabel } from '../lib/TurnSlider';
 import type { BasemapId, MapMeta } from '../lib/types';
@@ -25,6 +29,7 @@ import { Icon, IconButton, Section } from './ui';
 const TOOLS: [Tool, string, string][] = [
   ['select', 'Select and move', 'V'], ['symbol', 'NATO symbol', 'S'], ['asset', 'Custom graphic', 'G'], ['text', 'Text', 'T'],
   ['line', 'Line', 'L'], ['arrow', 'Arrow / axis of advance', 'A'], ['polygon', 'Polygon', 'P'], ['circle', 'Circle / range ring', 'C'], ['freehand', 'Freehand', 'F'],
+  ['measure', 'Measure distance or area', 'M'],
 ];
 
 export function Editor({ backend, who, onSignOut }: { backend: Backend; who: Who; onSignOut: () => void }) {
@@ -95,6 +100,9 @@ function Workspace({ backend, who, meta, maps, setMaps, onSignOut, onSwitch, onP
   const [managingPlayers, setManagingPlayers] = useState(false);
   const [admin, setAdmin] = useState<AdminTab | null>(null);
   const [teching, setTeching] = useState<TechTab | null>(null);
+  const measureRef = useRef<Measure | null>(null);
+  const [measured, setMeasured] = useState<MeasureState>(MEASURE_IDLE);
+  const [exporting, setExporting] = useState(false);
   const zoneDraw = useEd((s) => s.zoneDraw);
 
   // "Draw a zone on the map": once a polygon or circle is selected, go back to the Tech window.
@@ -220,6 +228,11 @@ function Workspace({ backend, who, meta, maps, setMaps, onSignOut, onSwitch, onP
           if (b?.turn && d) backend.reviewDraft(b.turn.id, playerId, { owner_changes: d.owner_changes }).then(refreshTurn).catch((e) => useEd.getState().say((e as Error).message));
         });
         const ix = new Interaction(m, marqueeEl.current!);
+        const measure = new Measure(m, setMeasured);
+        measureRef.current = measure;
+        measure.setActive(useEd.getState().tool === 'measure');
+        const unsubMeasure = useEd.subscribe((s, p) => s.tool !== p.tool && measure.setActive(s.tool === 'measure'));
+        disposers.push(unsubMeasure, () => measure.destroy());
         const saver = startAutosave(backend, meta, doc);
         flushRef.current = saver.flush;
         adoptRef.current = saver.adopt;
@@ -301,6 +314,7 @@ function Workspace({ backend, who, meta, maps, setMaps, onSignOut, onSwitch, onP
         >
           Set start view
         </button>
+        <button type="button" className="btn" title="Save the map as a PNG image or PDF" onClick={() => setExporting(true)}>Export</button>
         <button type="button" className="btn" onClick={() => setManagingPlayers(true)}>Players</button>
         <button type="button" className="btn" title="Tech tree, player points and spawn zones" onClick={() => (useEd.setState({ zoneDraw: false }), setTeching('tree'))}>Tech</button>
         <button
@@ -345,7 +359,8 @@ function Workspace({ backend, who, meta, maps, setMaps, onSignOut, onSwitch, onP
           <>
             {tool === 'symbol' && <SymbolPalette />}
             {tool === 'asset' && <AssetLibrary backend={backend} />}
-            {tool !== 'select' && tool !== 'symbol' && tool !== 'asset' && <StylePanel />}
+            {tool === 'measure' && <Section title="Measure"><MeasurePanel m={measureRef.current} s={measured} onClose={() => st().setTool('select')} /></Section>}
+            {tool !== 'select' && tool !== 'symbol' && tool !== 'asset' && tool !== 'measure' && <StylePanel />}
             {hasSel && <PropertiesPanel onAssign={assign} />}
             {tool === 'select' && !hasSel && <Help />}
           </>
@@ -361,6 +376,13 @@ function Workspace({ backend, who, meta, maps, setMaps, onSignOut, onSwitch, onP
       </footer>
 
       {sharing && <ShareDialog backend={backend} map={meta} flush={() => flushRef.current()} onClose={() => setSharing(false)} />}
+      {exporting && (
+        <ExportDialog
+          map={map} title={meta.name} attribution={attributionText(BASEMAPS[meta.basemap]?.attribution ?? '')}
+          subtitle={`${viewing ? `Turn ${viewing.viewing}` : bundle?.turn ? `Turn ${bundle.turn.number} in progress` : 'Live map'} · ${new Date().toLocaleDateString()}`}
+          prepare={() => st().select([])} onClose={() => setExporting(false)}
+        />
+      )}
       {teching && <TechDialog backend={backend} map={meta} tab={teching} refresh={refreshTurn} onClose={() => setTeching(null)} />}
       {managingPlayers && <PlayersDialog backend={backend} map={meta} settle={settle} onClose={() => setManagingPlayers(false)} />}
       {admin && (

@@ -272,4 +272,57 @@ describe('tech tree', () => {
     await rpc(OWNER, 'delete_tech_item', id.barracks);
     expect((await rpc(OWNER, 'get_economy', id.map)).items.find((x: Row) => x.id === id.rifle).spawn_from).toEqual([]);
   });
+
+  it('movement range per unit type comes from the tech tree; a per-unit override still wins', async () => {
+    id.scout = await item({ name: 'Scouts', spawn_cost: 1, sidc: 'SFGPUCR----F---', placement: 'anywhere', move_range_m: 1000 });
+    const b = buy(id.scout, 70, 10);
+    await save(A1, id.p1, [b]);
+    await push();
+    const t = await turn();
+    await rpc(OWNER, 'update_turn', t.id, J({ default_radius_m: 100000 }));
+    expect((await state(A1, id.p1)).radii[b.feature_id]).toBe(1000);
+    const go = (km: number) => ({ op: 'update', feature_id: b.feature_id, payload: { geometry: pt(70, 10 + km / 111.2) } });
+    await expect(save(A1, id.p1, [go(2)])).rejects.toThrow(/beyond the range of this unit \(1000 m\)/);
+    expect((await save(A1, id.p1, [go(0.5)])).count).toBe(1);
+    await rpc(OWNER, 'set_move_rule', t.id, b.feature_id, null, 5000);
+    expect((await save(A1, id.p1, [go(2)])).count).toBe(1);
+    await rpc(OWNER, 'set_move_rule', t.id, b.feature_id, null, null);
+    // Blank range = the turn's default.
+    await item({ id: id.scout, name: 'Scouts', spawn_cost: 1, sidc: 'SFGPUCR----F---', placement: 'anywhere', move_range_m: null });
+    expect((await state(A1, id.p1)).radii[b.feature_id]).toBe(100000);
+    await save(A1, id.p1, []);
+  });
+
+  it('a whole research chain can be done in one turn; rejecting a link fails what depends on it', async () => {
+    id.c1 = await item({ name: 'Optics', research_cost: 1, buyable: false });
+    id.c2 = await item({ name: 'Night vision', research_cost: 1, buyable: false, prereqs: [id.c1] });
+    id.c3 = await item({ name: 'Snipers', research_cost: 1, spawn_cost: 1, sidc: 'SFGPUCI----F---', placement: 'anywhere', prereqs: [id.c2] });
+    await rpc(OWNER, 'set_player_points', id.p1, 100, 100);
+    await expect(save(A1, id.p1, [research(id.c3), research(id.c2)])).rejects.toThrow(/Snipers|Night vision/);   // Optics missing
+    const sn = buy(id.c3, 71, 11);
+    expect((await save(A1, id.p1, [research(id.c3), research(id.c2), research(id.c1), sn])).count).toBe(4);
+    const t = await turn();
+    await rpc(OWNER, 'lock_turn', t.id);
+    await rpc(OWNER, 'review_draft', t.id, id.p1, J({ ready: true, rejected: [id.c1] }));
+    await expect(rpc(OWNER, 'push_turn', t.id)).rejects.toThrow(/Alice: .*prerequisites/);
+    await rpc(OWNER, 'review_draft', t.id, id.p1, J({ rejected: [] }));
+    await rpc(OWNER, 'push_turn', t.id);
+    expect((await player(id.p1)).tech_unlocked).toEqual(expect.arrayContaining([id.c1, id.c2, id.c3]));
+  });
+
+  it('tech is released turn by turn: hidden and locked before its turn', async () => {
+    const now = (await turn()).number;
+    id.late = await item({ name: 'Jets', research_cost: 2, buyable: false, release_turn: now + 1 });
+    id.freeLate = await item({ name: 'Militia', research_cost: 0, spawn_cost: 1, sidc: 'SFGPUCI----F---', placement: 'anywhere', release_turn: now + 1 });
+    const names = (s: Row) => s.tech.map((x: Row) => x.name);
+    expect(names(await state(A1, id.p1))).not.toContain('Jets');
+    expect(names(await state(A1, id.p1))).not.toContain('Militia');
+    expect((await rpc(OWNER, 'get_economy', id.map)).items.map((x: Row) => x.name)).toContain('Jets');   // the owner sees everything
+    await expect(save(A1, id.p1, [research(id.late)])).rejects.toThrow(new RegExp(`Jets can be researched from turn ${now + 1}`));
+    await expect(save(A1, id.p1, [buy(id.freeLate, 72, 12)])).rejects.toThrow(/not researched/);
+    await push();
+    expect(names(await state(A1, id.p1))).toEqual(expect.arrayContaining(['Jets', 'Militia']));
+    expect((await save(A1, id.p1, [research(id.late), buy(id.freeLate, 72, 12)])).count).toBe(2);
+    await save(A1, id.p1, []);
+  });
 });

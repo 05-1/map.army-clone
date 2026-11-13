@@ -119,6 +119,20 @@ describe('tech tree helpers', () => {
     expect(toggleRejected(draft, ['heli', 'u1'], 'u1')).toEqual([]);
   });
 
+  it('research chains: cancelling or rejecting a link drops everything after it; accepting pulls the chain back', async () => {
+    const { toggleRejected, withoutResearch, techStatus } = await import('../app/lib/tech');
+    const mk = (id: string, prereqs: string[] = []) => ({ id, name: id, research_cost: 1, prereqs }) as never;
+    const items = [mk('a'), mk('b', ['a']), mk('c', ['b'])];
+    const buyC = { op: 'create' as const, feature_id: 'u', payload: { kind: 'symbol' as const, geometry: { type: 'Point' as const, coordinates: [0, 0] }, purchase_id: 'c' } };
+    const draft = [{ op: 'research' as const, feature_id: 'a' }, { op: 'research' as const, feature_id: 'b' }, { op: 'research' as const, feature_id: 'c' }, buyC];
+    expect(techStatus(items[2], items, [], draft.slice(0, 2))).toBe('available');
+    expect(techStatus(items[2], items, [], [])).toBe('locked');
+    expect(withoutResearch(draft, 'a', [], items)).toEqual([]);
+    expect(withoutResearch(draft, 'b', [], items).map((c) => c.feature_id)).toEqual(['a']);
+    expect(toggleRejected(draft, [], 'a', items).sort()).toEqual(['a', 'b', 'c', 'u']);
+    expect(toggleRejected(draft, ['a', 'b', 'c', 'u'], 'u', items).sort()).toEqual([]);
+  });
+
   it('flowchart layout: saved positions win, the rest by tier', async () => {
     const { layout } = await import('../app/lib/TechTree');
     const mk = (id: string, tier: number, pos: [number, number] | null) => ({ id, name: id, tier, sort: 0, pos_x: pos?.[0] ?? null, pos_y: pos?.[1] ?? null }) as never;
@@ -126,5 +140,35 @@ describe('tech tree helpers', () => {
     expect(at.get('a')).toEqual({ x: 0, y: 0 });
     expect(at.get('b')).toEqual({ x: 0, y: 190 });
     expect(at.get('c')).toEqual({ x: 500, y: -40 });
+  });
+});
+
+describe('measuring and export', () => {
+  it('distance along a path and area on the sphere', async () => {
+    const { pathLength, ringArea, fmtArea } = await import('../app/lib/measure');
+    // One degree of latitude is about 111.2 km.
+    expect(pathLength([[0, 0], [0, 1], [0, 2]]) / 1000).toBeCloseTo(222.4, 0);
+    // A 1° x 1° square at the equator is about 12 364 km².
+    expect(ringArea([[0, 0], [1, 0], [1, 1], [0, 1]]) / 1e6).toBeGreaterThan(12200);
+    expect(ringArea([[0, 0], [1, 0], [1, 1], [0, 1]]) / 1e6).toBeLessThan(12500);
+    expect(ringArea([[0, 0], [1, 0]])).toBe(0);
+    expect(fmtArea(5000)).toBe('5000 m²');
+    expect(fmtArea(50_000)).toBe('5.0 ha');
+    expect(fmtArea(3_500_000)).toBe('3.50 km²');
+  });
+
+  it('writes a valid one-page PDF around a JPEG', async () => {
+    const { jpegToPdf } = await import('../app/lib/exportmap');
+    const jpeg = new Uint8Array([0xff, 0xd8, 1, 2, 3, 0xff, 0xd9]);
+    const pdf = jpegToPdf(jpeg, 1600, 900);
+    const text = new TextDecoder('latin1').decode(pdf);
+    expect(text.startsWith('%PDF-1.4')).toBe(true);
+    expect(text.trimEnd().endsWith('%%EOF')).toBe(true);
+    expect(text).toContain('/MediaBox [0 0 842 473.63]');
+    expect(text).toContain('/Width 1600 /Height 900');
+    // Every xref offset points at the start of its object.
+    const xref = +text.match(/startxref\n(\d+)/)![1];
+    const offsets = text.slice(xref).match(/\d{10} 00000 n/g)!.map((l) => +l.slice(0, 10));
+    offsets.forEach((o, i) => expect(text.slice(o, o + 8)).toBe(`${i + 1} 0 obj\n`));
   });
 });
