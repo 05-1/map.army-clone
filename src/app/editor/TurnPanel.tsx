@@ -383,7 +383,7 @@ function DraftDetail(p: { backend: Backend; turn: Turn; player: Player; draft?: 
   const cost = draftCost(changes, economy.items, draft?.rejected ?? []);
   const rejected = new Set(draft?.rejected ?? []);
   const review = (patch: Parameters<Backend['reviewDraft']>[2]) => act(() => backend.reviewDraft(turn.id, player.id, patch));
-  const toggle = (id: string) => review({ rejected: toggleRejected(changes, [...rejected], id) });
+  const toggle = (id: string) => review({ rejected: toggleRejected(changes, [...rejected], id, economy.items, bal?.tech_unlocked ?? []) });
 
   return (
     <div className="draft">

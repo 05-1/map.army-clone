@@ -2,6 +2,10 @@
 // no edit controls to unhide and no write code to call. All data arrives through one token-checked RPC.
 import type { Map as MlMap } from 'maplibre-gl';
 import { StrictMode, useEffect, useRef, useState } from 'react';
+import { Measure, type MeasureState } from '../lib/measure';
+import { MEASURE_IDLE, MeasurePanel } from '../lib/MeasurePanel';
+import { ExportDialog } from '../lib/ExportDialog';
+import { attributionText } from '../lib/exportmap';
 import { createRoot } from 'react-dom/client';
 import { asBasemap, BASEMAP_IDS, BASEMAPS, setBasemap } from '../lib/basemaps';
 import { fmtDist, fmtLatLon } from '../lib/geo';
@@ -33,6 +37,15 @@ function Viewer({ token }: { token: string }) {
   const mapRef = useRef<MlMap | null>(null);
   const [state, setState] = useState<State>({ s: 'loading' });
   const [title, setTitle] = useState('');
+  const [measuring, setMeasuring] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const measureRef = useRef<Measure | null>(null);
+  const measuringRef = useRef(false);
+  const [measured, setMeasured] = useState<MeasureState>(MEASURE_IDLE);
+  useEffect(() => {
+    measuringRef.current = measuring;
+    measureRef.current?.setActive(measuring);
+  }, [measuring]);
   const [mode, setMode] = useState<'live' | 'snapshot'>('live');
   const [online, setOnline] = useState(false);
   const [basemap, setBase] = useState<BasemapId>('satellite');
@@ -119,6 +132,7 @@ function Viewer({ token }: { token: string }) {
         map.getCanvas().style.cursor = map.queryRenderedFeatures(e.point, { layers: HIT_LAYERS }).length ? 'pointer' : '';
       });
       map.on('click', (e) => {
+        if (measuringRef.current) return;
         const hit = map.queryRenderedFeatures([[e.point.x - 5, e.point.y - 5], [e.point.x + 5, e.point.y + 5]], { layers: HIT_LAYERS })[0];
         setPicked(hit ? data.current?.features.find((f) => f.id === hit.properties.fid) ?? null : null);
       });
@@ -126,6 +140,8 @@ function Viewer({ token }: { token: string }) {
         if (dead) return;
         renderer = new SceneRenderer(map, (a) => publicAssetUrl(a.path));
         draw();
+        measureRef.current = new Measure(map, setMeasured);
+        measureRef.current.setActive(measuringRef.current);
       });
 
       if (p.mode === 'live' && p.channel) {
@@ -153,6 +169,8 @@ function Viewer({ token }: { token: string }) {
       stop();
       document.removeEventListener('visibilitychange', onVisible);
       renderer?.destroy();
+      measureRef.current?.destroy();
+      measureRef.current = null;
       mapRef.current?.remove();
       mapRef.current = null;
     };
@@ -176,6 +194,8 @@ function Viewer({ token }: { token: string }) {
             )}
             <span className="pill">View only</span>
             <span className="grow" />
+            <button type="button" className={`btn sm${measuring ? ' on' : ''}`} aria-pressed={measuring} onClick={() => (setMeasuring(!measuring), setPicked(null))}>Measure</button>
+            <button type="button" className="btn sm" onClick={() => setExporting(true)}>Export</button>
             <div className="seg compact" role="group" aria-label="Basemap">
               {BASEMAP_IDS.map((id) => (
                 <button
@@ -193,6 +213,14 @@ function Viewer({ token }: { token: string }) {
             </div>
           </div>
           {picked && <Details f={picked} onClose={() => setPicked(null)} />}
+          {measuring && <div className="measurebox"><MeasurePanel m={measureRef.current} s={measured} onClose={() => setMeasuring(false)} /></div>}
+          {exporting && (
+            <ExportDialog
+              map={mapRef.current} title={title} attribution={attributionText(BASEMAPS[basemap].attribution)}
+              subtitle={`${viewing != null ? `Turn ${viewing}` : mode === 'snapshot' ? 'Snapshot' : 'Live map'} · ${new Date().toLocaleDateString()}`}
+              onClose={() => setExporting(false)}
+            />
+          )}
           <div className="vfoot mono">
             <span ref={coordEl}>–</span>
             {updated && mode === 'live' && viewing === null && <span>updated {updated.toLocaleTimeString()}</span>}

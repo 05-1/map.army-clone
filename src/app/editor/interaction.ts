@@ -433,6 +433,7 @@ export class Interaction {
         return;
       case 'Backspace':
       case 'Delete':
+        if (st.tool === 'measure') return; // the measuring tool removes its own last point
         done();
         if (this.draft) {
           this.draft = this.draft.slice(0, -1);
@@ -454,7 +455,7 @@ export class Interaction {
       }
     }
 
-    const tools: Record<string, Tool> = { v: 'select', s: 'symbol', g: 'asset', t: 'text', l: 'line', a: 'arrow', p: 'polygon', c: 'circle', f: 'freehand' };
+    const tools: Record<string, Tool> = { v: 'select', s: 'symbol', g: 'asset', t: 'text', l: 'line', a: 'arrow', p: 'polygon', c: 'circle', f: 'freehand', m: 'measure' };
     if (tools[k]) st.setTool(tools[k]);
   };
 

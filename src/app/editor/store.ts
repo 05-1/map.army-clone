@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { DEFAULT_DRAFT, type SymbolDraft } from '../lib/symbols';
 import { DEFAULT_STYLE, type Asset, type Change, type Feature, type Layer, type MapMeta, type Player, type SnapshotPayload, type Style, type TurnBundle } from '../lib/types';
 
-export type Tool = 'select' | 'symbol' | 'asset' | 'text' | 'line' | 'arrow' | 'polygon' | 'circle' | 'freehand';
+export type Tool = 'select' | 'symbol' | 'asset' | 'text' | 'line' | 'arrow' | 'polygon' | 'circle' | 'freehand' | 'measure';
 export type SaveStatus = 'saved' | 'dirty' | 'saving' | 'error';
 
 interface Doc {

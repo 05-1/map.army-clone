@@ -70,8 +70,8 @@ export function TechTree({ items, icon, status, selected, onPick, footer, edit }
   const size = (id: string) => sizes.get(id) ?? { w: NODE_W, h: 90 };
 
   const all = items.map((it) => pos(it.id));
-  const minX = Math.min(0, ...all.map((p) => p.x)) - PAD;
-  const minY = Math.min(0, ...all.map((p) => p.y)) - PAD;
+  const minX = (all.length ? Math.min(...all.map((p) => p.x)) : 0) - PAD;
+  const minY = (all.length ? Math.min(...all.map((p) => p.y)) : 0) - PAD;
   const maxX = Math.max(NODE_W, ...items.map((it) => pos(it.id).x + size(it.id).w)) + PAD;
   const maxY = Math.max(90, ...items.map((it) => pos(it.id).y + size(it.id).h)) + PAD;
   const W = maxX - minX;
@@ -85,6 +85,14 @@ export function TechTree({ items, icon, status, selected, onPick, footer, edit }
     const same = next.size === sizes.size && [...next].every(([k, v]) => sizes.get(k)?.w === v.w && sizes.get(k)?.h === v.h);
     if (!same) setSizes(next);
   });
+  // On a narrow screen, start zoomed out far enough to see most of the tree.
+  const fitted = useRef(false);
+  useLayoutEffect(() => {
+    const s = scroller.current;
+    if (fitted.current || !s || !items.length || !sizes.size) return;
+    fitted.current = true;
+    if (W > s.clientWidth) setZoom(Math.max(0.5, +((s.clientWidth - 8) / W).toFixed(2)));
+  }, [items.length, sizes.size, W]);
   useLayoutEffect(() => {
     // Forget local positions the server now agrees with.
     if (!over.size) return;
@@ -230,6 +238,7 @@ export function TechTree({ items, icon, status, selected, onPick, footer, edit }
                   </div>
                   <small>
                     {it.category === 'building' && <span className="tag bld">building</span>}
+                    {it.release_turn != null && !status && <span className="tag warn rel">turn {it.release_turn}</span>}
                     {it.research_cost ? `Research ${costText(it, 'research')}` : 'Starts unlocked'}
                     {it.buyable ? ` · ${it.category === 'building' ? 'Build' : 'Buy'} ${costText(it, 'buy')}` : ' · research only'}
                   </small>

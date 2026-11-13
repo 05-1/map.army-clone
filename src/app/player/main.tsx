@@ -12,6 +12,10 @@ import { cleanHeading, describeChange, dropPart, fmtWhen, MAX_ORDER_LEN, summari
 import { publicAssetUrl } from '../lib/supabase';
 import { costText, fmtPts, isUnlocked, techStatus, usable, whereText, withoutResearch } from '../lib/tech';
 import { TechTree } from '../lib/TechTree';
+import { Measure, type MeasureState } from '../lib/measure';
+import { MEASURE_IDLE, MeasurePanel } from '../lib/MeasurePanel';
+import { ExportDialog } from '../lib/ExportDialog';
+import { attributionText } from '../lib/exportmap';
 import { TurnSlider, turnLabel } from '../lib/TurnSlider';
 import type { BasemapId, Feature, PlayerAllocation, Pos, TechItem, Zone } from '../lib/types';
 import '../styles.css';
@@ -53,6 +57,11 @@ function Game({ token }: { token: string }) {
   const [online, setOnline] = useState(false);
   const [basemap, setBase] = useState<BasemapId>('satellite');
   const [treeOpen, setTreeOpen] = useState(false);
+  const [panelOpen, setPanelOpen] = useState(true);
+  const [exporting, setExporting] = useState(false);
+  const measureRef = useRef<Measure | null>(null);
+  const [measured, setMeasured] = useState<MeasureState>(MEASURE_IDLE);
+  const tool = usePlay((s) => s.tool);
   const state = usePlay((s) => s.state);
   const hint = usePlay((s) => s.hint);
   const viewing = usePlay((s) => s.viewing);
@@ -132,7 +141,14 @@ function Game({ token }: { token: string }) {
         if (coordEl.current) coordEl.current.textContent = fmtLatLon([e.lngLat.lng, e.lngLat.lat]);
       });
       map.once('load', () => {
-        if (!dead) controller = new PlayController(map);
+        if (dead) return;
+        controller = new PlayController(map);
+        const m = new Measure(map, setMeasured);
+        measureRef.current = m;
+        m.setActive(usePlay.getState().tool === 'measure');
+        const unsub = usePlay.subscribe((s, p) => s.tool !== p.tool && m.setActive(s.tool === 'measure'));
+        const prev = controller.destroy.bind(controller);
+        controller.destroy = () => (unsub(), m.destroy(), prev());
       });
 
       channel.current = openChannel(first.channel, refreshSoon, (ok) => {
@@ -202,6 +218,8 @@ function Game({ token }: { token: string }) {
               {!turn ? 'No turn open' : turn.status === 'locked' ? `Turn ${turn.number} · locked for review` : turn.frozen ? `Turn ${turn.number} · deadline passed` : `Turn ${turn.number}${turn.deadline ? ` · due ${fmtWhen(turn.deadline)}` : ''}`}
             </span>
             <span className="grow" />
+            <button type="button" className={`btn sm${tool === 'measure' ? ' on' : ''}`} aria-pressed={tool === 'measure'} onClick={() => usePlay.getState().setTool(tool === 'measure' ? 'select' : 'measure')}>Measure</button>
+            <button type="button" className="btn sm" onClick={() => setExporting(true)}>Export</button>
             <div className="seg compact" role="group" aria-label="Basemap">
               {BASEMAP_IDS.map((id) => (
                 <button key={id} type="button" className={basemap === id ? 'on' : ''} onClick={() => (setBase(id), mapRef.current && setBasemap(mapRef.current, id))}>
@@ -213,16 +231,29 @@ function Game({ token }: { token: string }) {
           {viewing ? (
             <div className="banner" role="status">Viewing {turnLabel({ number: viewing.viewing, label: null, at: '' }).toLowerCase()}. Read-only.</div>
           ) : (
-            <aside className="ppanel left" aria-label="Your turn">
-              <TurnBox refresh={() => refreshRef.current()} announce={() => announceDraft(channel.current)} />
-              <TechBox openTree={() => setTreeOpen(true)} />
-              <Tools />
-              <DraftList />
-              <LastTurn />
-            </aside>
+            panelOpen ? (
+              <aside className="ppanel left" aria-label="Your turn">
+                <button type="button" className="btn sm panelhide" onClick={() => setPanelOpen(false)} title="Hide this panel to see more of the map">Hide ▾</button>
+                <TurnBox refresh={() => refreshRef.current()} announce={() => announceDraft(channel.current)} />
+                <TechBox openTree={() => setTreeOpen(true)} />
+                <Tools />
+                <DraftList />
+                <LastTurn />
+              </aside>
+            ) : (
+              <button type="button" className="btn panelshow" onClick={() => setPanelOpen(true)}>Orders ▴</button>
+            )
           )}
           <Details />
           {treeOpen && <TechModal onClose={() => setTreeOpen(false)} />}
+          {tool === 'measure' && <div className="measurebox right"><MeasurePanel m={measureRef.current} s={measured} onClose={() => usePlay.getState().setTool('select')} /></div>}
+          {exporting && (
+            <ExportDialog
+              map={mapRef.current} title={`${state.map.name} · ${state.player.name}`} attribution={attributionText(BASEMAPS[basemap].attribution)}
+              subtitle={`${viewing ? `Turn ${viewing.viewing}` : turn ? `Turn ${turn.number}, with my draft` : 'Live map'} · ${new Date().toLocaleDateString()}`}
+              prepare={() => usePlay.setState({ sel: null })} onClose={() => setExporting(false)}
+            />
+          )}
           {hint && <div className="toast" role="status">{hint}</div>}
           <div className="vfoot mono">
             <span ref={coordEl}>–</span>
@@ -291,6 +322,7 @@ function AllocIcon({ a }: { a: PlayerAllocation }) {
 
 function Tools() {
   const tool = usePlay((s) => s.tool);
+  const drawing = usePlay((s) => s.drawing);
   const allocId = usePlay((s) => s.allocId);
   const state = usePlay((s) => s.state!);
   const draft = usePlay((s) => s.draft);
@@ -305,8 +337,19 @@ function Tools() {
           <button key={t} type="button" className={`btn sm${tool === t ? ' on' : ''}`} aria-pressed={tool === t} onClick={() => usePlay.getState().setTool(t)}>{label}</button>
         ))}
       </div>
-      {tool === 'select' && <p className="tip">Your units have a ring in your colour and a dashed circle showing how far they can go this turn. Drag one to move it, or click it to turn it or give it an order.</p>}
-      {(tool === 'arrow' || tool === 'line' || tool === 'polygon') && <p className="tip">Click to add points. Double-click or Enter to finish, Backspace removes the last point, Esc cancels.</p>}
+      {tool === 'select' && <p className="tip">Your units have a ring in your colour and a dashed circle showing how far they can go this turn. Drag one (with the mouse or a finger) to move it, or click or tap it to turn it or give it an order.</p>}
+      {(tool === 'arrow' || tool === 'line' || tool === 'polygon') && (
+        <>
+          <p className="tip">Click or tap to add points. Double-click, Enter or Finish ends it; Backspace or Undo point removes the last point; Esc cancels.</p>
+          {drawing > 0 && (
+            <div className="row2 wrap">
+              <button type="button" className="btn sm primary" disabled={drawing < (tool === 'polygon' ? 3 : 2)} onClick={() => window.dispatchEvent(new CustomEvent('tacmap:draw', { detail: 'finish' }))}>Finish</button>
+              <button type="button" className="btn sm" onClick={() => window.dispatchEvent(new CustomEvent('tacmap:draw', { detail: 'undo' }))}>Undo point</button>
+              <button type="button" className="btn sm" onClick={() => window.dispatchEvent(new CustomEvent('tacmap:draw', { detail: 'cancel' }))}>Cancel</button>
+            </div>
+          )}
+        </>
+      )}
       {tool === 'text' && <p className="tip">Click the map to drop a note, then type its text.</p>}
       {state.allocations.length > 0 && (
         <>
@@ -454,7 +497,7 @@ function TechModal({ onClose }: { onClose(): void }) {
         )}
         <p className="tip">
           {editable
-            ? 'Research is added to your draft and paid for when the owner pushes the turn. You can buy and place a researched unit straight away, in the same draft. A new research needs its prerequisites researched in an earlier turn.'
+            ? 'Research is added to your draft and paid for when the owner pushes the turn. You can buy and place a researched unit straight away, in the same draft, and research a whole chain of items in one turn if you have the points.'
             : 'The turn is not open for orders, so nothing can be researched or bought right now.'}
         </p>
       </div>

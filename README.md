@@ -66,8 +66,15 @@ Players can buy their own reinforcements instead of you allocating them.
 - **Tech > Spawn zones**: add a whole **country** (type its name), or click "Draw a zone on the map", draw a polygon or circle, and the window comes back to add it. Each zone is for one player, a team or everyone; rename or reassign it in the list. Zones show on your map as dotted outlines.
 - **Tech > Player points**: set each player's spawn and research points, hand out points to everyone or a team, and grant or remove research by hand.
 - To make a unit you placed yourself earn income or act as a spawn point, select it and pick its **Tech type** in the properties panel (it must also be assigned to a player).
-- Players research and buy inside their weekly draft. Nothing is charged until you push; a rejected purchase or research costs nothing. A unit can be bought in the same draft that researches it; a new research still needs its prerequisites researched in an earlier turn. Rejecting a research in review also rejects what the draft buys from it. Income is paid at each push, for the units each player owns after the turn's moves.
+- Players research and buy inside their weekly draft. Nothing is charged until you push; a rejected purchase or research costs nothing. A player can research a whole chain in one turn (if they have the points) and buy its units in the same draft. Rejecting a research in review also rejects the research and purchases that depend on it.
+- **Release by turn**: give an item "Released on turn N". Players do not see it, and cannot research or (if free) buy it, before turn N. You always see the whole tree; boxes show "turn N". Income is paid at each push, for the units each player owns after the turn's moves.
 - Balances are stored with every turn, so a rollback restores them. Manual reinforcements (Turn > Reinforcements) still work alongside the tree.
+
+### Map tools
+
+- **Measure** (editor: ruler tool or M; player and viewer pages: Measure button): click points for a distance, or switch to Area for area and perimeter. Double-click, Enter or Finish ends it. Nothing is saved.
+- **Export** (editor top bar, player and viewer pages): downloads what is on screen as a PNG or a one-page PDF, at screen or double resolution, with a footer for the title, date and map credits.
+- **Phones and tablets**: players drag their own units with a finger, tap to place and draw (Finish / Undo point buttons replace double-click), and can hide the side panel to see more of the map. On a narrow screen a unit's details open at the bottom.
 
 Everyone has a turn slider to step back through earlier turns. Under Manage > History and backup you can view any turn, roll back to one, and download or restore a backup.
 
@@ -130,6 +137,7 @@ Nothing in this table needs Supabase or GitHub. Each control calls a database fu
 | **Tech tree and points** | | |
 | Add, edit, delete tech items and buildings (costs, prerequisites, unit, income, spawn radius, placement, producing buildings, movable) | Tech > Tech tree | `save_tech_item`, `delete_tech_item`, `get_economy` |
 | Arrange the flowchart | Tech > Tech tree: drag boxes | `move_tech_items` |
+| Release an item on a given turn | Tech > Tech tree > an item > Released on turn | `save_tech_item` |
 | Spawn and research points per player, hand out points | Tech > Player points | `set_player_points` |
 | Grant or remove research for a player | Tech > Player points > Researched | `set_player_tech` |
 | Spawn zones (countries or drawn shapes) per player, team or everyone | Tech > Spawn zones | `save_spawn_zone`, `delete_spawn_zone` |
@@ -227,6 +235,6 @@ npm run dev          # dev server; put VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KE
 npm run release      # typecheck, build into src/dist, then copy the site into the repository root (keeps config.js)
 ```
 
-`npm run fake` runs the real `setup.sql` in an in-process Postgres behind a small stand-in for Supabase's API, so the whole app can be tried with no account. `tests/e2e/scenario.mjs` drives a complete turn through it in a headless browser, and `tests/e2e/tech.mjs` the tech tree (both need Playwright installed separately).
+`npm run fake` runs the real `setup.sql` in an in-process Postgres behind a small stand-in for Supabase's API, so the whole app can be tried with no account. `tests/e2e/scenario.mjs` drives a complete turn through it in a headless browser, `tests/e2e/tech.mjs` the tech tree, and `tests/e2e/tools.mjs` measuring, export and the player page on a phone (all need Playwright installed separately).
 
 When you change the database, edit `supabase/setup.sql`, raise the number in its last statement and `SCHEMA_VERSION` in `app/lib/supabase.ts` together, and keep the file re-runnable: `tests/upgrade.test.ts` runs it over an older schema and twice in a row.

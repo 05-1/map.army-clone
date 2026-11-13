@@ -291,6 +291,7 @@ create table if not exists public.tech_items (
   can_move        boolean not null default true,                                  -- false: players cannot move it once placed
   spawn_from      uuid[] not null default '{}',                                   -- buildings that produce this unit (empty = any spawn point)
   move_range_m    double precision check (move_range_m is null or move_range_m >= 0),  -- per turn; null = the turn's default
+  release_turn    integer check (release_turn is null or release_turn >= 1),       -- hidden from players, and not researchable, before this turn
   created_at      timestamptz not null default now(),
   check (asset_id is null or sidc is null),
   check (not buyable or asset_id is not null or sidc is not null)
@@ -302,7 +303,8 @@ alter table public.tech_items
   add column if not exists category text not null default 'unit' check (category in ('unit', 'building')),
   add column if not exists can_move boolean not null default true,
   add column if not exists spawn_from uuid[] not null default '{}',
-  add column if not exists move_range_m double precision check (move_range_m is null or move_range_m >= 0);
+  add column if not exists move_range_m double precision check (move_range_m is null or move_range_m >= 0),
+  add column if not exists release_turn integer check (release_turn is null or release_turn >= 1);
 
 -- Areas where bought units may be placed: for one player, a team, or (both null) everyone on the map.
 create table if not exists public.spawn_zones (
@@ -716,10 +718,15 @@ as $$
   end;
 $$;
 
--- A tech item this player may use: free from the start, or researched.
-create function private.unlocked(p public.players, it public.tech_items) returns boolean
+-- Released by turn n: no release turn, or that turn has come.
+create function private.released(it public.tech_items, n integer) returns boolean
+language sql immutable set search_path = ''
+as $$ select it.release_turn is null or n is null or n >= it.release_turn; $$;
+
+-- A tech item this player may use on turn n: researched, or free and released.
+create function private.unlocked(p public.players, it public.tech_items, n integer default null) returns boolean
 language sql stable set search_path = ''
-as $$ select it.research_cost = 0 or it.id = any (p.tech_unlocked); $$;
+as $$ select it.id = any (p.tech_unlocked) or (it.research_cost = 0 and private.released(it, n)); $$;
 
 -- May this player put a unit bought from this item at position pos? Spawn points count where the
 -- player's units stand on the live map, i.e. where they started the turn.
@@ -813,7 +820,7 @@ begin
          or k not in ('symbol', 'asset') then
         raise exception 'unit does not match its tech item' using errcode = '42501';
       end if;
-      if strict and not private.unlocked(p, it) then
+      if strict and not private.unlocked(p, it, t.number) then
         raise exception '% is not researched yet', it.name using errcode = '42501';
       end if;
       if strict and not private.can_spawn_at(p, it, private.anchor(j -> 'geometry')) then
@@ -846,12 +853,16 @@ begin
     if not found then
       raise exception 'unknown tech item' using errcode = '22023';
     end if;
-    if private.unlocked(p, it) then
+    if strict and not private.released(it, t.number) then
+      raise exception '% can be researched from turn %', it.name, it.release_turn using errcode = '42501';
+    end if;
+    if it.id = any (p.tech_unlocked) or (it.research_cost = 0 and private.released(it, t.number)) then
       raise exception '% is already available', it.name using errcode = '22023';
     end if;
+    -- p here already counts the draft's other research, so a whole chain can be researched in one turn.
     if strict and exists (
       select 1 from unnest(it.prereqs) as need (item_id) join public.tech_items x on x.id = need.item_id
-      where not private.unlocked(p, x)) then
+      where not private.unlocked(p, x, t.number)) then
       raise exception '% needs its prerequisites researched first', it.name using errcode = '42501';
     end if;
 
@@ -943,9 +954,10 @@ declare
   it public.tech_items;
   cost_s bigint;
   cost_r bigint;
-  -- The player as purchases see them: what this draft researches counts as researched, so a unit
-  -- can be bought the same turn its research is done. Research itself still needs earlier turns.
+  -- The player as each change sees them: what this draft researches counts as researched, so a whole
+  -- chain can be researched, and its units bought, in one turn. A research does not count itself.
   pp public.players := p;
+  fresh uuid[];
 begin
   if jsonb_typeof(p_changes) is distinct from 'array' then
     raise exception 'a draft is a list of changes' using errcode = '22023';
@@ -953,7 +965,7 @@ begin
   if jsonb_array_length(p_changes) > 200 or octet_length(p_changes::text) > 256000 then
     raise exception 'draft is too large' using errcode = '22023';
   end if;
-  pp.tech_unlocked := p.tech_unlocked || coalesce(array(
+  fresh := coalesce(array(
     select (ch ->> 'feature_id')::uuid from jsonb_array_elements(p_changes) ch
     where ch ->> 'op' = 'research' and not ((ch ->> 'feature_id')::uuid = any (p_rejected))), '{}');
   for c in select * from jsonb_array_elements(p_changes) loop
@@ -988,7 +1000,8 @@ begin
       end if;
     end if;
     if not (fid = any (p_rejected)) then
-      perform private.check_change(case when op = 'create' then pp else p end, t, op, fid, clean, strict);
+      pp.tech_unlocked := p.tech_unlocked || case when op = 'create' then fresh when op = 'research' then array_remove(fresh, fid) else '{}' end;
+      perform private.check_change(case when op in ('create', 'research') then pp else p end, t, op, fid, clean, strict);
     end if;
     result := result || jsonb_build_array(jsonb_build_object('op', op, 'feature_id', fid, 'payload', clean));
   end loop;
@@ -1883,20 +1896,22 @@ begin
   end if;
   insert into public.tech_items (id, map_id, name, description, tier, sort, research_cost, spawn_cost, prereqs, buyable,
                                  asset_id, sidc, props, income_spawn, income_research, spawn_radius_m, placement, pos_x, pos_y,
-                                 category, can_move, spawn_from, move_range_m)
+                                 category, can_move, spawn_from, move_range_m, release_turn)
   values (tid, p_map_id, trim(p ->> 'name'), nullif(trim(p ->> 'description'), ''), coalesce((p ->> 'tier')::integer, 1),
           coalesce((p ->> 'sort')::integer, 0), coalesce((p ->> 'research_cost')::integer, 0), coalesce((p ->> 'spawn_cost')::integer, 0),
           pre, coalesce((p ->> 'buyable')::boolean, true), asset, case when asset is null then nullif(p ->> 'sidc', '') end, props,
           coalesce((p ->> 'income_spawn')::integer, 0), coalesce((p ->> 'income_research')::integer, 0),
           nullif((p ->> 'spawn_radius_m')::float8, 0), coalesce(p ->> 'placement', 'either'),
           (p ->> 'pos_x')::float8, (p ->> 'pos_y')::float8,
-          coalesce(p ->> 'category', 'unit'), coalesce((p ->> 'can_move')::boolean, true), sfrom, (p ->> 'move_range_m')::float8)
+          coalesce(p ->> 'category', 'unit'), coalesce((p ->> 'can_move')::boolean, true), sfrom, (p ->> 'move_range_m')::float8,
+          (p ->> 'release_turn')::integer)
   on conflict (id) do update set name = excluded.name, description = excluded.description, tier = excluded.tier, sort = excluded.sort,
     research_cost = excluded.research_cost, spawn_cost = excluded.spawn_cost, prereqs = excluded.prereqs, buyable = excluded.buyable,
     asset_id = excluded.asset_id, sidc = excluded.sidc, props = excluded.props, income_spawn = excluded.income_spawn,
     income_research = excluded.income_research, spawn_radius_m = excluded.spawn_radius_m, placement = excluded.placement,
     pos_x = coalesce(excluded.pos_x, public.tech_items.pos_x), pos_y = coalesce(excluded.pos_y, public.tech_items.pos_y),
-    category = excluded.category, can_move = excluded.can_move, spawn_from = excluded.spawn_from, move_range_m = excluded.move_range_m;
+    category = excluded.category, can_move = excluded.can_move, spawn_from = excluded.spawn_from, move_range_m = excluded.move_range_m,
+    release_turn = excluded.release_turn;
   -- No loops: an item may not (indirectly) require itself.
   if exists (
     with recursive up (id) as (
@@ -2185,6 +2200,7 @@ declare
   p public.players := private.me(p_player_id);
   m public.maps;
   t public.turns;
+  n integer;   -- the turn tech releases are judged against: the open one, else the next one
 begin
   if p.id is null then return null; end if;
   if p.last_seen_at is null or p.last_seen_at < now() - interval '1 minute' then
@@ -2192,6 +2208,7 @@ begin
   end if;
   select * into m from public.maps where id = p.map_id;
   t := private.active_turn(p.map_id);
+  n := coalesce(t.number, (select max(x.number) + 1 from public.turns x where x.map_id = p.map_id), 1);
 
   return private.build_payload(p.map_id, p.visible_layers) || jsonb_build_object(
     'player', jsonb_build_object('id', p.id, 'name', p.name, 'team', p.team, 'color', p.color),
@@ -2217,9 +2234,11 @@ begin
     -- Tech tree: the whole tree is public to players; balances and research are their own.
     'economy', jsonb_build_object('spawn_points', p.spawn_points, 'research_points', p.research_points,
                                   'tech_unlocked', to_jsonb(p.tech_unlocked), 'income', private.income(p.id)),
-    'tech', coalesce((select jsonb_agg(private.tech_json(x) order by x.tier, x.sort, x.name) from public.tech_items x where x.map_id = p.map_id), '[]'::jsonb),
+    -- Items not released yet are left out entirely, until their turn.
+    'tech', coalesce((select jsonb_agg(private.tech_json(x) order by x.tier, x.sort, x.name) from public.tech_items x
+                       where x.map_id = p.map_id and private.released(x, n)), '[]'::jsonb),
     'tech_assets', coalesce((select jsonb_agg(private.asset_json(a)) from public.assets a
-                               where a.id in (select x.asset_id from public.tech_items x where x.map_id = p.map_id)), '[]'::jsonb),
+                               where a.id in (select x.asset_id from public.tech_items x where x.map_id = p.map_id and private.released(x, n))), '[]'::jsonb),
     'spawn_zones', coalesce((select jsonb_agg(jsonb_build_object('id', z.id, 'name', z.name, 'zone', z.zone) order by z.created_at)
                                from public.spawn_zones z
                               where z.map_id = p.map_id
@@ -2426,7 +2445,7 @@ exception when others then
   raise notice 'pg_net is not available here; Discord announcements are disabled';
 end $$;
 
-insert into public.app_meta (key, value) values ('schema_version', '6')
+insert into public.app_meta (key, value) values ('schema_version', '7')
 on conflict (key) do update set value = excluded.value, updated_at = now();
 
 commit;

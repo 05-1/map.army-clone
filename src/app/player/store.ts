@@ -4,7 +4,7 @@ import type { Change, CreatePayload, Feature, PlayerAllocation, PlayerState, Sna
 import { draftCost, withoutResearch } from '../lib/tech';
 import { saveDraft } from './client';
 
-export type PTool = 'select' | 'place' | 'buy' | 'text' | 'arrow' | 'line' | 'polygon';
+export type PTool = 'select' | 'place' | 'buy' | 'text' | 'arrow' | 'line' | 'polygon' | 'measure';
 export type SaveStatus = 'saved' | 'dirty' | 'saving' | 'error';
 
 interface Play {
@@ -21,6 +21,8 @@ interface Play {
   allocId: string | null;
   /** Tech item being bought and placed (tool = 'buy'). */
   buyId: string | null;
+  /** Points of the arrow, line or area being drawn (0 = not drawing). */
+  drawing: number;
   sel: string | null;
   hint: string;
   /** A past turn shown read-only in place of the live map. */
@@ -66,6 +68,7 @@ export const usePlay = create<Play>()((set, get) => {
     tool: 'select',
     allocId: null,
     buyId: null,
+    drawing: 0,
     sel: null,
     hint: '',
     viewing: null,
@@ -145,8 +148,9 @@ export const usePlay = create<Play>()((set, get) => {
         void get().flush();
       }
     },
-    setTool: (tool, allocId = null) => set({ tool, allocId, buyId: null, hint: '' }),
-    startBuy: (buyId) => set({ tool: 'buy', buyId, allocId: null, hint: '' }),
+    // Any tool but select closes the details box, which would otherwise sit over the map (on a phone above all).
+    setTool: (tool, allocId = null) => set({ tool, allocId, buyId: null, hint: '', ...(tool !== 'select' ? { sel: null } : {}) }),
+    startBuy: (buyId) => set({ tool: 'buy', buyId, allocId: null, hint: '', sel: null }),
     say(hint) {
       set({ hint });
       clearTimeout(hintTimer);

@@ -4,7 +4,7 @@
 // Every edit only changes the draft. The live map changes when the owner pushes the turn.
 // Range and zone checks here are for feel only; save_draft() enforces the same rules.
 import type { Feature as GjFeature } from 'geojson';
-import type { GeoJSONSource, LayerSpecification, Map as MlMap, MapMouseEvent } from 'maplibre-gl';
+import type { GeoJSONSource, LayerSpecification, Map as MlMap, MapMouseEvent, MapTouchEvent } from 'maplibre-gl';
 import { circlePoly, fromMerc, toMerc, translateGeom } from '../lib/geo';
 import { hitLayers, SceneRenderer } from '../lib/scene';
 import { anchorOf, baseId, clampToRadius, ghostFeatures, GHOST_LAYERS, inZone, zoneGeometry } from '../lib/submissions';
@@ -55,8 +55,14 @@ export class PlayController {
     map.on('mousemove', this.onMove);
     map.on('click', this.onClick);
     map.on('dblclick', this.onDblClick);
+    // Touch: one finger on your unit drags it (the map does not pan); taps arrive as clicks.
+    map.on('touchstart', this.onTouchStart);
+    map.on('touchmove', this.onTouchMove);
+    map.on('touchend', this.onUp);
+    map.on('touchcancel', this.onUp);
     window.addEventListener('mouseup', this.onUp);
     window.addEventListener('keydown', this.onKey);
+    window.addEventListener('tacmap:draw', this.onDrawCmd);
     this.unsub = usePlay.subscribe((s, p) => {
       if (s.tool !== p.tool) {
         this.pts = null;
@@ -72,6 +78,7 @@ export class PlayController {
     this.unsub();
     window.removeEventListener('mouseup', this.onUp);
     window.removeEventListener('keydown', this.onKey);
+    window.removeEventListener('tacmap:draw', this.onDrawCmd);
     this.live.destroy();
     this.draft.destroy();
   }
@@ -117,11 +124,13 @@ export class PlayController {
       for (const p of this.pts) add({ type: 'Point', coordinates: p }, 'v');
     }
     (this.map.getSource(OVERLAY) as GeoJSONSource | undefined)?.setData({ type: 'FeatureCollection', features: out });
+    const n = this.pts?.length ?? 0;
+    if (S().drawing !== n) usePlay.setState({ drawing: n });
   }
 
-  /** Id of the object under the pointer: draft objects first, then the live map. */
-  private hit(pt: { x: number; y: number }): string | null {
-    const box: [[number, number], [number, number]] = [[pt.x - 5, pt.y - 5], [pt.x + 5, pt.y + 5]];
+  /** Id of the object under the pointer: draft objects first, then the live map. A finger gets a bigger target. */
+  private hit(pt: { x: number; y: number }, r = 5): string | null {
+    const box: [[number, number], [number, number]] = [[pt.x - r, pt.y - r], [pt.x + r, pt.y + r]];
     const d = this.map.queryRenderedFeatures(box, { layers: DRAFT_HIT })[0];
     if (d && !S().viewing) return baseId(String(d.properties.fid));
     const l = this.map.queryRenderedFeatures(box, { layers: LIVE_HIT })[0];
@@ -185,13 +194,46 @@ export class PlayController {
   }
 
   private onDown = (e: MapMouseEvent) => {
-    if (e.originalEvent.button !== 0 || S().tool !== 'select' || !S().editable()) return;
-    const id = this.hit(e.point);
+    if (e.originalEvent.button !== 0) return;
+    this.grab(e, 5);
+  };
+  private onTouchStart = (e: MapTouchEvent) => {
+    if (e.points.length !== 1) {
+      this.drag = null; // a second finger means zoom or rotate
+      return;
+    }
+    this.grab(e, 16);
+  };
+  private onTouchMove = (e: MapTouchEvent) => {
+    if (!this.drag) return;
+    if (e.points.length !== 1) return void (this.drag = null);
+    e.preventDefault();
+    this.onMove(e);
+  };
+  /** Start dragging the player's own unit under the pointer or finger. */
+  private grab(e: MapMouseEvent | MapTouchEvent, r: number) {
+    if (S().tool !== 'select' || !S().editable()) return;
+    const id = this.hit(e.point, r);
     const eff = effective(id);
     if (!id || !eff?.mine || eff.change?.op === 'delete') return;
     e.preventDefault(); // no map panning while an object is dragged
     this.drag = { fid: id, grab: [e.lngLat.lng, e.lngLat.lat], from: anchorOf(eff.f.geometry) };
     usePlay.setState({ sel: id });
+  }
+  /** Buttons for touch screens, where there is no Enter key and double-tap is unreliable. */
+  private onDrawCmd = (e: Event) => {
+    const cmd = (e as CustomEvent<'finish' | 'undo' | 'cancel'>).detail;
+    if (!this.pts) return;
+    if (cmd === 'finish') this.finish();
+    else if (cmd === 'undo') {
+      this.pts = this.pts.slice(0, -1);
+      if (!this.pts.length) this.pts = null;
+      this.draw();
+    } else {
+      this.pts = null;
+      this.cursor = null;
+      this.draw();
+    }
   };
 
   /** Where the dragged object's anchor may go: inside its movement range, or inside its placement zone. */
@@ -209,7 +251,7 @@ export class PlayController {
     return clampToRadius(anchorOf(eff.live!.geometry), want, s.state.radii[fid]);
   }
 
-  private onMove = (e: MapMouseEvent) => {
+  private onMove = (e: MapMouseEvent | MapTouchEvent) => {
     const now: Pos = [e.lngLat.lng, e.lngLat.lat];
     const d = this.drag;
     if (d) {
@@ -244,7 +286,8 @@ export class PlayController {
   private onClick = (e: MapMouseEvent) => {
     const tool = S().tool;
     const at: Pos = [e.lngLat.lng, e.lngLat.lat];
-    if (tool === 'select') return usePlay.setState({ sel: this.hit(e.point) });
+    if (tool === 'measure') return; // the measuring tool takes the clicks
+    if (tool === 'select') return usePlay.setState({ sel: this.hit(e.point, 10) });
     if (!S().editable()) return void S().put({ op: 'delete', feature_id: '' }); // explains why not
     if (!DRAW.includes(tool)) return this.place(tool, at);
     this.pts = [...(this.pts ?? []), at];
