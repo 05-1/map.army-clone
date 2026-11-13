@@ -19,6 +19,8 @@ export function createMap(container: HTMLElement, view: { basemap: BasemapId; ce
     attributionControl: false,
     doubleClickZoom: false,
     boxZoom: false,
+    // One world only: no repeated copies side to side; panning stops at the edge of the world.
+    renderWorldCopies: false,
   });
   map.addControl(new AttributionControl({ compact: true }), 'bottom-right');
   map.addControl(new NavigationControl({ visualizePitch: false }), 'bottom-right');
