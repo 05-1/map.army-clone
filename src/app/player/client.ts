@@ -75,6 +75,11 @@ export async function fetchTerrain(playerId: string): Promise<import('geojson').
   return must(await sb!.rpc('get_player_terrain', { p_player_id: playerId })) as import('geojson').FeatureCollection | null;
 }
 
+/** Change a squadron's loadout now (free and instant). Returns its new combat radius. */
+export async function setLoadout(playerId: string, squadronId: string, loadout: { weapon: string; count: number }[]): Promise<{ radius_m: number; weight: number }> {
+  return must(await sb!.rpc('set_loadout', { p_player_id: playerId, p_squadron_id: squadronId, p_loadout: loadout })) as { radius_m: number; weight: number };
+}
+
 export async function setReady(playerId: string, ready: boolean): Promise<void> {
   must(await sb!.rpc('set_ready', { p_player_id: playerId, p_ready: ready }));
 }

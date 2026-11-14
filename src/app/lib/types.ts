@@ -165,6 +165,8 @@ export interface UpdatePayload {
   attacks?: { slot: number; target: string }[];
   /** Leave the engagement this unit is in (takes one parting round, then may move). */
   retreat?: boolean;
+  /** Radar AA: emitting (true) or dark (false); kept until changed. */
+  emit?: boolean;
 }
 
 export type Change =
@@ -172,7 +174,13 @@ export type Change =
   | { op: 'update'; feature_id: string; payload: UpdatePayload }
   | { op: 'delete'; feature_id: string; payload?: Record<string, never> }
   /** Research a tech item. feature_id is the item's id. */
-  | { op: 'research'; feature_id: string; payload?: Record<string, never> };
+  | { op: 'research'; feature_id: string; payload?: Record<string, never> }
+  /** One mission per squadron per turn; feature_id is the squadron. */
+  | { op: 'mission'; feature_id: string; payload: { type: 'strike' | 'patrol' | 'escort' | 'recon'; target?: Pos; target_unit?: string; escort_of?: string; radius_m?: number } }
+  /** Replacement aircraft for a squadron, arriving at push. */
+  | { op: 'buy_aircraft'; feature_id: string; payload: { squadron: string; count: number } }
+  /** A new squadron at one of the player's airbases; feature_id becomes the squadron's id. */
+  | { op: 'buy_squadron'; feature_id: string; payload: { purchase_id: string; base: string; name?: string } };
 
 export interface HistoryEntry {
   number: number;
@@ -253,8 +261,8 @@ export interface TechItem {
   /** Metres. Set = units of this type are spawn points. */
   spawn_radius_m: number | null;
   placement: Placement;
-  /** A production building (usually a spawn point that cannot move) or a unit. */
-  category: 'unit' | 'building';
+  /** A unit, a production building, a missile tier (research only, managed in the Air window) or a squadron to buy. */
+  category: 'unit' | 'building' | 'weapon' | 'squadron';
   /** False: players cannot move it once placed. */
   can_move: boolean;
   /** Buildings that produce this unit; empty = any of the player's spawn points. */
@@ -265,6 +273,8 @@ export interface TechItem {
   release_turn: number | null;
   /** Combat stats for units bought from it. */
   template_id: string | null;
+  /** category 'squadron': buying it raises a squadron of this airframe. */
+  airframe_id?: string | null;
   /** Place in the flowchart; null = laid out by tier. */
   pos_x: number | null;
   pos_y: number | null;
@@ -342,6 +352,7 @@ export interface PlayerState {
   /** This player's own units that are spawn points, where they stand now. */
   spawn_points: { feature_id: string; center: Pos; radius_m: number; name: string; item_id: string }[];
   combat: PlayerCombat;
+  air: PlayerAir;
   /** Outcome of the most recent pushed turn. */
   last: { number: number; applied: boolean; changes: Change[]; edited: boolean; rejected: string[]; owner_note: string | null } | null;
 }
@@ -367,6 +378,11 @@ export interface WeaponProfile {
   range_m: number;
   indirect: boolean;
   deleted_at: string | null;
+  anti_air?: boolean;
+  guidance?: 'none' | 'radar' | 'ir' | 'gun';
+  accuracy?: number;
+  air_damage?: number;
+  air_shots?: number;
 }
 
 export interface UnitTemplate {
@@ -379,6 +395,10 @@ export interface UnitTemplate {
   sidc: string | null;
   weapon_ids: string[];
   deleted_at: string | null;
+  /** Squadrons it can base (0 = not an airbase). */
+  air_capacity?: number;
+  /** Active protection against AGMs (percentage points). */
+  aps?: number;
 }
 
 export interface UnitLive {
@@ -424,6 +444,7 @@ export interface CombatAdmin {
 export interface PlayerCombat {
   intel_km: number;
   own: Record<string, { template: string; category: string; max: number; strength: number; experience: number; stationary_turns: number; engaged: boolean;
+    radar_aa?: boolean; anti_air?: boolean; emit?: boolean;
     weapons: { slot: number; name: string; range_m: number; indirect: boolean }[] }>;
   seen: Record<string, { band: string; ground: boolean }>;
   engagements: { id: string; turns: number; units: string[] | null }[];
@@ -434,4 +455,116 @@ export interface CombatReport {
   turn: number;
   own: { id: string; name: string; max: number; before: number; after: number; destroyed: boolean; fired: boolean; hit: boolean; recovered: number }[];
   engagements: { id: string; status: string; new: boolean; end_reason: string | null; rounds: number; own: string[]; others: { name: string; band: string | null }[] }[];
+  air?: AirReport;
+}
+
+export interface AirReport {
+  squadrons: { name: string; mission: string | null; before: number; after: number; lost: number }[];
+  downed: number;
+  strikes: { squadron: string; target: string; hits: number; shots: number; damage: number; destroyed: boolean; aborted: string | null }[];
+  recon: { squadron: string; center: Pos; radius_m: number; units: { name: string; type: string; strength: number; max: number }[];
+    squadrons: { name: string; airframe: string; aircraft: number; max: number }[] }[];
+}
+
+// ---------------------------------------------------------------------------
+// Air combat
+// ---------------------------------------------------------------------------
+
+export type AirGuidance = 'radar' | 'ir' | 'harm' | 'agm' | 'none';
+
+export interface Airframe {
+  id: string;
+  name: string;
+  hp: number;
+  hardpoints: number;
+  max_payload: number;
+  radius_m: number;
+  radar_m: number;
+  signature: number;
+  ecm: number;
+  flares: number;
+  maneuver: number;
+  gun_accuracy: number;
+  gun_damage: number;
+  gun_range_m: number;
+  squadron_size: number;
+  cost_per_aircraft: number;
+  asset_id: string | null;
+  sidc: string | null;
+  deleted_at: string | null;
+}
+
+export interface AirFamily {
+  id: string;
+  name: string;
+  guidance: AirGuidance;
+  color: string | null;
+  sort: number;
+  deleted_at: string | null;
+}
+
+export interface AirWeapon {
+  id: string;
+  family_id: string;
+  tier: number;
+  name: string;
+  guidance: AirGuidance;
+  accuracy: number;
+  range_m: number;
+  damage: number;
+  ap: number;
+  weight: number;
+  slots: number;
+  targets: ('air' | 'ground' | 'ship' | 'radar')[];
+  tech_item_id: string | null;
+  research_cost: number | null;
+  release_turn: number | null;
+  deleted_at: string | null;
+}
+
+export interface LoadoutEntry { weapon: string; count: number }
+
+export interface Squadron {
+  id: string;
+  name: string;
+  owner_player_id: string | null;
+  airframe_id: string;
+  base_feature_id: string | null;
+  aircraft: number;
+  max_aircraft: number;
+  damage: number;
+  loadout: LoadoutEntry[];
+  radius_m: number;
+  weight: number;
+}
+
+export interface AirBase { id: string; name: string; owner: string | null; capacity: number; used: number; pos: Pos }
+
+export interface AirAdmin {
+  airframes: Airframe[];
+  families: AirFamily[];
+  weapons: AirWeapon[];
+  squadrons: Squadron[];
+  bases: AirBase[];
+}
+
+/** A player's view of air: own squadrons and bases in full; missiles as fit data; others as bands or recon. */
+export interface PlayerAir {
+  squadrons: {
+    id: string; name: string; aircraft: number; max: number; damage: number; loadout: LoadoutEntry[]; base: string | null; base_name: string | null;
+    base_pos: Pos | null; radius_m: number; weight: number;
+    airframe: { id: string; name: string; hp: number; hardpoints: number; max_payload: number; radius_m: number; radar_m: number; cost_per_aircraft: number; sidc: string | null; asset_id: string | null };
+  }[];
+  weapons: { id: string; name: string; family: string; family_color: string | null; tier: number; guidance: AirGuidance; range_m: number; weight: number; slots: number;
+    targets: string[]; tech_item: string | null; unlocked: boolean }[];
+  bases: { id: string; name: string; capacity: number; used: number; pos: Pos }[];
+  radius_penalty: number;
+  patrol_radius_km: number;
+  patrol_radius_max_km: number;
+  recon_radius_km: number;
+  enemy_bases: { base: string; squadrons: string[] }[];
+  reveals: { center: Pos; radius_m: number }[];
+  revealed: Record<string, { type: string; strength: number; max: number }>;
+  revealed_squadrons: { base: string; name: string; airframe: string; aircraft: number; max: number }[];
+  squadron_items: { id: string; name: string; spawn_cost: number; airframe: string; size: number; unlocked: boolean }[];
 }

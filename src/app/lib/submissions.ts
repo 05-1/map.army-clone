@@ -36,7 +36,7 @@ export function applyUpdate(f: Feature, u: UpdatePayload): Feature {
 /** The object a change is about, as it would look once approved. Null for deletes and unknown targets. */
 export function proposed(c: Change, live: Map<string, Feature>): Feature | null {
   if (c.op === 'create') return featureFromCreate(c);
-  if (c.op === 'research') return null;
+  if (c.op !== 'update' && c.op !== 'delete') return null;   // research and air orders have no object on the map
   const f = live.get(c.feature_id);
   if (!f || c.op === 'delete') return null;
   return applyUpdate(f, c.payload);
@@ -69,7 +69,7 @@ export function ghostFeatures(changes: Change[], live: Feature[], color = '#f2a9
 
   changes.forEach((c, i) => {
     const z = i * 4;
-    if (c.op === 'research') return;
+    if (c.op !== 'create' && c.op !== 'update' && c.op !== 'delete') return;
     if (c.op === 'create') {
       out.push(featureFromCreate(c, z + 1));
       return;
@@ -99,7 +99,19 @@ export function ghostFeatures(changes: Change[], live: Feature[], color = '#f2a9
 const nameOf = (f: Feature | undefined) => clip(f?.props.name?.split('\n')[0] || (f ? KIND_NAME[f.kind] : 'unknown object'), 40);
 
 /** One line per change, for lists. Pass the tech tree to name research and purchases. */
-export function describeChange(c: Change, live: Map<string, Feature>, tech: readonly TechItem[] = []): string {
+export const MISSION_NAME = { strike: 'Strike', patrol: 'Patrol', escort: 'Escort', recon: 'Recon' } as const;
+
+export function describeChange(c: Change, live: Map<string, Feature>, tech: readonly TechItem[] = [], squadronName: (id: string) => string = () => 'squadron'): string {
+  if (c.op === 'mission') {
+    const p = c.payload;
+    const where = p.type === 'strike' ? ` on ${nameOf(live.get(p.target_unit ?? ''))}` : p.type === 'escort' ? ` for ${squadronName(p.escort_of ?? '')}` : '';
+    return `${MISSION_NAME[p.type]}${where}: ${squadronName(c.feature_id)}`;
+  }
+  if (c.op === 'buy_aircraft') return `Buy ${c.payload.count} aircraft for ${squadronName(c.payload.squadron)}`;
+  if (c.op === 'buy_squadron') {
+    const it = tech.find((x) => x.id === c.payload.purchase_id);
+    return `Raise a new squadron${c.payload.name ? ` "${clip(c.payload.name, 30)}"` : ''}: ${it?.name ?? 'squadron'}${it?.spawn_cost ? ` (${it.spawn_cost} spawn)` : ''}`;
+  }
   if (c.op === 'research') {
     const it = tech.find((x) => x.id === c.feature_id);
     return `Research ${it ? clip(it.name, 40) : 'unknown item'}${it?.research_cost ? ` (${it.research_cost} research)` : ''}`;
@@ -130,6 +142,9 @@ export function summarize(changes: Change[]): string {
   const add = (k: string) => n.set(k, (n.get(k) ?? 0) + 1);
   for (const c of changes) {
     if (c.op === 'research') add('research');
+    else if (c.op === 'mission') add('air mission');
+    else if (c.op === 'buy_aircraft') add('aircraft order');
+    else if (c.op === 'buy_squadron') add('new squadron');
     else if (c.op === 'create') add(c.payload.purchase_id ? 'purchase' : `new ${KIND_NAME[c.payload.kind]}`);
     else if (c.op === 'delete') add('removal');
     else {

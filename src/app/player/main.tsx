@@ -23,6 +23,7 @@ import { announceDraft, closeChannel, fetchHistory, fetchState, fetchTerrain, jo
 import { setTerrain } from '../lib/terrainLayer';
 import { TerrainLegend } from '../lib/TerrainLegend';
 import { PlayController } from './controller';
+import { AirBox, AirReportPart } from './AirPanel';
 import { effective, pointsLeft, remaining, usePlay, type PTool } from './store';
 
 const POLL_MS = 60_000;
@@ -251,6 +252,7 @@ function Game({ token }: { token: string }) {
                 <TurnBox refresh={() => refreshRef.current()} announce={() => announceDraft(channel.current)} />
                 <TechBox openTree={() => setTreeOpen(true)} />
                 <Tools />
+                <AirBox refresh={() => refreshRef.current()} />
                 <DraftList />
                 <LastTurn />
                 <CombatReportBox />
@@ -528,6 +530,8 @@ function DraftList() {
   const sel = usePlay((s) => s.sel);
   const editable = usePlay((s) => !!s.state?.turn && !s.state.turn.frozen);
   const live = useMemo(() => new Map(features.map((f) => [f.id, f])), [features]);
+  const sqName = useSqName();
+  const isAir = (c: { op: string }) => c.op === 'research' || c.op === 'mission' || c.op === 'buy_aircraft' || c.op === 'buy_squadron';
   return (
     <section className="section">
       <header><h3>Your draft{draft.length ? ` (${draft.length})` : ''}</h3></header>
@@ -538,8 +542,8 @@ function DraftList() {
           {draft.map((c) => (
             <li key={c.feature_id} className={sel === c.feature_id ? 'on' : ''}>
               <div className="row">
-                <span role="button" tabIndex={0} onClick={() => c.op !== 'research' && usePlay.setState({ sel: c.feature_id, tool: 'select' })} onKeyDown={(e) => e.key === 'Enter' && c.op !== 'research' && usePlay.setState({ sel: c.feature_id, tool: 'select' })}>
-                  {describeChange(c, live, tech)}
+                <span role="button" tabIndex={0} onClick={() => !isAir(c) && usePlay.setState({ sel: c.feature_id, tool: 'select' })} onKeyDown={(e) => e.key === 'Enter' && !isAir(c) && usePlay.setState({ sel: c.feature_id, tool: 'select' })}>
+                  {describeChange(c, live, tech, sqName)}
                 </span>
                 {editable && <button type="button" className="ib" title="Take this out of the draft" aria-label="Take this out of the draft" onClick={() => usePlay.getState().drop(c.feature_id)}>✕</button>}
               </div>
@@ -551,11 +555,17 @@ function DraftList() {
   );
 }
 
+function useSqName() {
+  const sqs = usePlay((s) => s.state!.air?.squadrons);
+  return (id: string) => sqs?.find((q) => q.id === id)?.name ?? 'squadron';
+}
+
 function LastTurn() {
   const last = usePlay((s) => s.state!.last);
   const features = usePlay((s) => s.state!.features);
   const tech = usePlay((s) => s.state!.tech);
   const live = useMemo(() => new Map(features.map((f) => [f.id, f])), [features]);
+  const sqName = useSqName();
   if (!last) return null;
   const rejected = last.changes.filter((c) => last.rejected.includes(c.feature_id));
   return (
@@ -568,7 +578,7 @@ function LastTurn() {
       </p>
       {last.applied && rejected.length > 0 && (
         <ul className="changes">
-          {rejected.map((c) => <li key={c.feature_id} className="off"><div className="row"><span><span className="tag bad">rejected</span> {describeChange(c, live, tech)}</span></div></li>)}
+          {rejected.map((c) => <li key={c.feature_id} className="off"><div className="row"><span><span className="tag bad">rejected</span> {describeChange(c, live, tech, sqName)}</span></div></li>)}
         </ul>
       )}
       {last.owner_note && <p className="quote">Owner: {last.owner_note}</p>}
@@ -702,6 +712,13 @@ function OwnCombat({ fid, editable }: { fid: string; editable: boolean }) {
           );
         })}
       </ul>
+      {c.radar_aa && (
+        <label className="check">
+          <input type="checkbox" disabled={!editable} checked={change?.op === 'update' && change.payload.emit != null ? change.payload.emit : c.emit ?? true}
+            onChange={(e) => st.put({ op: 'update', feature_id: fid, payload: { emit: e.target.checked } })} />
+          Radar on. Off (dark) hides it from HARMs but halves its radar AA accuracy. Kept until you change it.
+        </label>
+      )}
       {editable && c.engaged && (
         <label className="check">
           <input type="checkbox" checked={retreat} onChange={(e) => st.put({ op: 'update', feature_id: fid, payload: { retreat: e.target.checked } })} />
@@ -717,6 +734,23 @@ function OwnCombat({ fid, editable }: { fid: string; editable: boolean }) {
 function OtherCombat({ fid }: { fid: string }) {
   const seen = usePlay((s) => s.state!.combat.seen[fid]);
   const km = usePlay((s) => s.state!.combat.intel_km);
+  const air = usePlay((s) => s.state!.air);
+  const exact = air?.revealed[fid];
+  const base = air?.enemy_bases.find((b) => b.base === fid);
+  const rsq = air?.revealed_squadrons.filter((q) => q.base === fid) ?? [];
+  if (exact || base || rsq.length) {
+    return (
+      <div className="revealed">
+        {exact && <p>Recon (last turn, exact): {exact.type}, strength {exact.strength} / {exact.max}</p>}
+        {rsq.length > 0 ? (
+          <p>Squadrons here (recon): {rsq.map((q) => `${q.name}, ${q.aircraft} / ${q.max} ${q.airframe}`).join('; ')}</p>
+        ) : base && (
+          <p>Airbase with {base.squadrons.length} squadron{base.squadrons.length === 1 ? '' : 's'}: {base.squadrons.map((b, i) => <span key={i} className={`band ${b.replace(' ', '-')}`}>{b}</span>)}</p>
+        )}
+        {!exact && seen?.ground && <p>Estimated condition: <span className={`band ${seen.band.replace(' ', '-')}`}>{seen.band}</span></p>}
+      </div>
+    );
+  }
   if (!seen) return <p className="tip">No intel: none of your units is within {km} km.</p>;
   if (!seen.ground) return null;
   return <p>Estimated condition: <span className={`band ${seen.band.replace(' ', '-')}`}>{seen.band}</span></p>;
@@ -725,7 +759,8 @@ function OtherCombat({ fid }: { fid: string }) {
 /** What combat did to this player's units at the last push, and what they know of the other side. */
 function CombatReportBox() {
   const r = usePlay((s) => s.state!.combat?.report);
-  if (!r || (!r.own.length && !r.engagements.length)) return null;
+  const a = r?.air;
+  if (!r || (!r.own.length && !r.engagements.length && !(a && (a.squadrons.length || a.strikes.length || a.recon.length || a.downed)))) return null;
   return (
     <section className="section">
       <header><h3>Combat report, turn {r.turn}</h3></header>
@@ -748,6 +783,7 @@ function CombatReportBox() {
           {e.status === 'ended' ? ` · ended (${e.end_reason})` : ` · ${e.rounds} round${e.rounds === 1 ? '' : 's'}, continues`}
         </p>
       ))}
+      <AirReportPart />
     </section>
   );
 }

@@ -5,6 +5,7 @@
 //
 // Every random number comes from a hash of (map, turn, engagement, round, salt, shot), so the same
 // inputs and salts always give the same result, and one engagement can be re-rolled on its own.
+import { resolveAir, type AirResult, type GroundTarget, type SquadronIn } from './air';
 import type { Pos } from './types';
 
 // ---------------------------------------------------------------------------
@@ -36,6 +37,13 @@ export interface CombatSettings {
   band_heavy: number;
   terrain: Record<Terrain, number>;
   terrain_min_km2: { urban: number; forest: number };
+  hit_min: number;
+  hit_max: number;
+  radius_penalty: number;
+  dark_penalty: number;
+  patrol_radius_km: number;
+  patrol_radius_max_km: number;
+  recon_radius_km: number;
 }
 
 /** Same values as private.combat_defaults() in setup.sql. */
@@ -47,6 +55,8 @@ export const DEFAULT_SETTINGS: CombatSettings = {
   intel_km: 100, band_fresh: 0.9, band_damaged: 0.6, band_heavy: 0.3,
   terrain: { open: 1.0, urban: 0.7, forest: 0.8 },
   terrain_min_km2: { urban: 25, forest: 50 },
+  hit_min: 5, hit_max: 95, radius_penalty: 0.4, dark_penalty: 0.5,
+  patrol_radius_km: 50, patrol_radius_max_km: 200, recon_radius_km: 25,
 };
 
 export interface WeaponIn {
@@ -57,6 +67,12 @@ export interface WeaponIn {
   ap: number;
   range_m: number;
   indirect: boolean;
+  /** Anti-air: fires at aircraft over targets in range. */
+  anti_air?: boolean;
+  guidance?: 'none' | 'radar' | 'ir' | 'gun';
+  accuracy?: number;
+  air_damage?: number;
+  air_shots?: number;
 }
 
 export interface UnitIn {
@@ -64,7 +80,7 @@ export interface UnitIn {
   name: string;
   owner: string | null;
   side: string;
-  template: { id: string; name: string; max_strength: number; armor: number; category: 'ground' | 'air' | 'naval' };
+  template: { id: string; name: string; max_strength: number; armor: number; category: 'ground' | 'air' | 'naval'; aps?: number; air_capacity?: number };
   weapons: WeaponIn[];
   start: Pos;
   pos: Pos;
@@ -77,6 +93,8 @@ export interface UnitIn {
   new: boolean;
   retreat: boolean;
   attacks: { slot: number; target: string }[];
+  /** Radar on (emitting) this turn. Dark radar AA cannot be targeted by HARMs but aims worse. */
+  emit?: boolean;
 }
 
 export interface EngagementIn {
@@ -92,6 +110,8 @@ export interface CombatInputs {
   settings: CombatSettings;
   units: UnitIn[];
   engagements: EngagementIn[];
+  /** Air: squadrons with their missions this turn. */
+  squadrons?: SquadronIn[];
 }
 
 /** The owner's choices that shape a result: salts (re-rolls) and hand-edited damage per shot. */
@@ -185,6 +205,8 @@ export interface CombatResult {
   units: UnitOut[];
   engagements: EngagementOut[];
   log: { indirect: Phase | null; engagements: EngagementLog[]; failed: FailedAttack[] };
+  /** The air phase, resolved before ground combat. */
+  air?: AirResult;
 }
 
 // ---------------------------------------------------------------------------
@@ -328,6 +350,15 @@ export function resolveCombat(inputs: CombatInputs, data: PreviewData): CombatRe
   const ground = (u: Live | undefined): u is Live => !!u && u.template.category === 'ground' && u.cur > 0;
   const failed: FailedAttack[] = [];
   const weaponOf = (u: Live, slot: number) => u.weapons.find((w) => w.slot === slot);
+
+  // ---- 0. Air: interceptions, SEAD and AA, strikes, recon. Ground combat then runs on what is left.
+  let air: AirResult | undefined;
+  if (inputs.squadrons?.length) {
+    const roller = (salt: string) => ({ s, edits: data.edits, rand: (...parts: (string | number)[]) => rand01(inputs.map_id, inputs.turn, 'air', salt, ...parts) });
+    const targets = new Map([...units.values()].filter((u) => u.template.category === 'ground').map((u) => [u.id, u as unknown as GroundTarget]));
+    for (const u of targets.values()) u.emit = u.emit ?? true;
+    air = resolveAir(inputs.squadrons, targets, roller(data.salt), (pkg) => roller(data.salts[pkg] ?? data.salt));
+  }
 
   /** Fire one weapon. Damage is returned, not applied, so rounds can be simultaneous. */
   const fire = (a: Live, w: WeaponIn, t: Live, eid: string, round: number | string, phase: string, salt: string, strength: number): Shot => {
@@ -524,6 +555,8 @@ export function resolveCombat(inputs: CombatInputs, data: PreviewData): CombatRe
 
   // ---- 4. End of turn: experience, stationary count, recovery.
   const active = new Set(logs.filter((l) => l.status === 'active').flatMap((l) => l.units.map((x) => x.fid)));
+  // A unit hit from the air this turn does not recover this turn either.
+  for (const st of air?.strikes ?? []) if (st.hits > 0) active.add(st.target);
   const out: UnitOut[] = [];
   for (const u of [...units.values()].sort((a, b) => a.id.localeCompare(b.id))) {
     const destroyed = u.cur <= 0;
@@ -546,6 +579,7 @@ export function resolveCombat(inputs: CombatInputs, data: PreviewData): CombatRe
     engagements: all.map((l) => ({ id: l.id, status: l.status, new: l.new, start_turn: l.start_turn, turns_engaged: l.turns_engaged,
       end_reason: l.end_reason, rounds: l.rounds.length, units: l.units })),
     log: { indirect: indirect.length ? { label: 'Indirect fire', shots: indirect } : null, engagements: all, failed },
+    ...(air ? { air } : {}),
   };
 }
 

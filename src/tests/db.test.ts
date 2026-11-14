@@ -66,7 +66,7 @@ beforeAll(async () => {
 
 describe('setup.sql', () => {
   it('records a schema version that anyone can read, and nothing else', async () => {
-    expect(await rpc(null, 'app_status')).toEqual({ schema_version: 9, claimed: false });
+    expect(await rpc(null, 'app_status')).toEqual({ schema_version: 10, claimed: false });
     await expect(as(null, () => q('select * from public.app_meta'))).rejects.toThrow(/permission denied/);
   });
 
@@ -114,7 +114,7 @@ describe('setup.sql', () => {
   it('is safe to run again: data survives, version stays, functions are rebuilt', async () => {
     await db.exec(SETUP);
     await db.exec(SETUP);
-    expect(await rpc(null, 'app_status')).toEqual({ schema_version: 9, claimed: true });
+    expect(await rpc(null, 'app_status')).toEqual({ schema_version: 10, claimed: true });
     expect((await su('select count(*)::int as n from public.features'))[0].n).toBe(4);
     expect((await su('select count(*)::int as n from public.players where invite_token is not null'))[0].n).toBe(3);
     expect((await state(A1, id.p1))?.player.name).toBe('Alice');
@@ -191,7 +191,7 @@ describe('turn cycle', () => {
   it('enforces ownership and keeps drafts to position, heading and orders', async () => {
     await expect(save(A1, id.p1, [move(id.u2, 10.21, 50)])).rejects.toThrow(/not assigned/);
     await expect(save(A1, id.p1, [move(id.secret, 12, 50)])).rejects.toThrow(/not assigned/);
-    await expect(save(A1, id.p1, [{ op: 'update', feature_id: id.u1, payload: { props: { name: 'pwned' } } }])).rejects.toThrow(/position, heading, orders, attacks and retreat only/);
+    await expect(save(A1, id.p1, [{ op: 'update', feature_id: id.u1, payload: { props: { name: 'pwned' } } }])).rejects.toThrow(/position, heading, orders, attacks, retreat and radar only/);
     await expect(save(A1, id.p1, [move(id.u1, 10.1, 50), move(id.u1, 10.1, 50)])).rejects.toThrow(/one change per object/);
     await expect(save(A2, id.p1, [move(id.u1, 10.1, 50)])).rejects.toThrow(/not a player/);
     await expect(save(STRANGER, id.p1, [])).rejects.toThrow(/not a player/);
@@ -411,7 +411,7 @@ describe('history', () => {
 
   it('backup and restore round-trips a campaign, links included', async () => {
     const backup = await rpc(OWNER, 'export_campaign', id.map);
-    expect(backup).toMatchObject({ format: 'tacmap-campaign', version: 1, schema: 9 });
+    expect(backup).toMatchObject({ format: 'tacmap-campaign', version: 1, schema: 10 });
     expect(J(backup)).not.toContain('auth_uid');
     await expect(rpc(OWNER, 'import_campaign', J(backup))).rejects.toThrow(/already exists/);
     await expect(rpc(OWNER, 'import_campaign', J({ ...backup, format: 'nope' }))).rejects.toThrow(/not a Tacmap campaign/);
@@ -523,7 +523,7 @@ describe('admins and settings', () => {
     for (const k of ['restored backup', 'PIN lockout', 'opened on another device', 'set PIN', 'revoked player', 'regenerated invite']) {
       expect(kinds).toContain(k);
     }
-    expect(await rpc(OWNER, 'diagnostics')).toMatchObject({ schema_version: 9, pg_net: false });
+    expect(await rpc(OWNER, 'diagnostics')).toMatchObject({ schema_version: 10, pg_net: false });
     expect((await rpc(OWNER, 'diagnostics')).last_keepalive).toBeTruthy();
   });
 

@@ -25,6 +25,10 @@ interface Play {
   drawing: number;
   /** Picking a target on the map for one weapon of one of the player's units. */
   targeting: { fid: string; slot: number } | null;
+  /** Picking the target of a squadron's mission on the map. */
+  airPick: { squadron: string; type: 'strike' | 'patrol' | 'recon'; radius_m?: number } | null;
+  /** The squadron whose card is open (its radius ring is drawn). */
+  airSel: string | null;
   sel: string | null;
   hint: string;
   /** A past turn shown read-only in place of the live map. */
@@ -55,7 +59,11 @@ let saving = false;
 let again = false;
 
 export const usePlay = create<Play>()((set, get) => {
-  const change = (draft: Change[]) => {
+  const change = (next: Change[]) => {
+    // An escort needs its strike: escorts of a strike that was cancelled or changed go with it.
+    const strikes = new Set(next.filter((c) => c.op === 'mission' && c.payload.type === 'strike').map((c) => c.feature_id));
+    const draft = next.filter((c) => c.op !== 'mission' || c.payload.type !== 'escort' || strikes.has(c.payload.escort_of ?? ''));
+    if (draft.length < next.length) get().say('Its escort was stood down too.');
     set({ draft, saveStatus: 'dirty' });
     clearTimeout(saveTimer);
     saveTimer = window.setTimeout(() => void get().flush(), SAVE_DELAY_MS);
@@ -72,6 +80,8 @@ export const usePlay = create<Play>()((set, get) => {
     buyId: null,
     drawing: 0,
     targeting: null,
+    airPick: null,
+    airSel: null,
     sel: null,
     hint: '',
     viewing: null,
@@ -152,7 +162,7 @@ export const usePlay = create<Play>()((set, get) => {
       }
     },
     // Any tool but select closes the details box, which would otherwise sit over the map (on a phone above all).
-    setTool: (tool, allocId = null) => set({ tool, allocId, buyId: null, hint: '', targeting: null, ...(tool !== 'select' ? { sel: null } : {}) }),
+    setTool: (tool, allocId = null) => set({ tool, allocId, buyId: null, hint: '', targeting: null, airPick: null, ...(tool !== 'select' ? { sel: null } : {}) }),
     startBuy: (buyId) => set({ tool: 'buy', buyId, allocId: null, hint: '', sel: null }),
     say(hint) {
       set({ hint });
@@ -172,7 +182,7 @@ export function remaining(a: PlayerAllocation, draft: Change[]): number {
 export function pointsLeft(): { spawn: number; research: number } {
   const { state, draft } = usePlay.getState();
   if (!state) return { spawn: 0, research: 0 };
-  const c = draftCost(draft, state.tech);
+  const c = draftCost(draft, state.tech, [], (sq) => state.air?.squadrons.find((q) => q.id === sq)?.airframe.cost_per_aircraft ?? 0);
   return { spawn: state.economy.spawn_points - c.spawn, research: state.economy.research_points - c.research };
 }
 

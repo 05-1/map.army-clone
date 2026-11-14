@@ -21,7 +21,8 @@ begin
             where schemaname = 'public' and tablename = any (array['maps','layers','features','assets','share_links','players',
               'turns','turn_move_rules','allocations','drafts','snapshots','activity','app_meta','submissions','submission_changes',
               'tech_items','spawn_zones','weapon_profiles','unit_templates','unit_state','engagements','combat_settings',
-              'combat_previews','combat_reports','terrain_zones','terrain_meta']) loop
+              'combat_previews','combat_reports','terrain_zones','terrain_meta','airframes','air_weapon_families','air_weapons',
+              'squadrons','air_reveals']) loop
     execute format('drop policy %I on public.%I', r.policyname, r.tablename);
   end loop;
   -- Everything in `private` is ours. Cascade also removes the triggers and column defaults that use them; both are re-created below.
@@ -43,6 +44,7 @@ begin
               'move_tech_items',
               'get_combat_admin','save_weapon','save_unit_template','save_combat_settings','set_unit_state','end_engagement',
               'get_combat_inputs','save_combat_preview','get_combat_preview','replace_terrain','get_terrain','get_player_terrain','get_shared_terrain',
+              'get_air_admin','save_airframe','save_air_family','save_air_weapon','save_squadron','delete_squadron','seed_air_families','set_loadout',
               'submit_turn','withdraw_submission','review_submission']) loop
     execute 'drop function ' || r.sig || ' cascade';
   end loop;
@@ -429,6 +431,109 @@ create table if not exists public.terrain_meta (
 
 alter table public.tech_items add column if not exists template_id uuid;   -- units bought from it get this template
 
+-- ---------------------------------------------------------------------------
+-- Air combat (schema 10). Aircraft live in squadrons at a base (a unit whose template has air capacity);
+-- they are never on the map between turns. Missiles are researched through the tech tree.
+-- ---------------------------------------------------------------------------
+create table if not exists public.airframes (
+  id               uuid primary key default gen_random_uuid(),
+  map_id           uuid not null references public.maps (id) on delete cascade,
+  name             text not null check (char_length(name) between 1 and 80),
+  hp               double precision not null default 100 check (hp > 0 and hp <= 1000000),      -- per aircraft
+  hardpoints       integer not null default 6 check (hardpoints between 0 and 50),
+  max_payload      double precision not null default 6000 check (max_payload >= 0),           -- kg
+  radius_m         double precision not null default 600000 check (radius_m >= 0),             -- combat radius, empty
+  radar_m          double precision not null default 100000 check (radar_m >= 0),
+  signature        double precision not null default 1 check (signature between 0 and 100),   -- RCS multiplier; stealth is low
+  ecm              double precision not null default 20 check (ecm between 0 and 100),        -- vs radar-guided
+  flares           double precision not null default 20 check (flares between 0 and 100),     -- vs IR
+  maneuver         double precision not null default 20 check (maneuver between 0 and 100),   -- vs guns
+  gun_accuracy     double precision not null default 40 check (gun_accuracy between 0 and 100),
+  gun_damage       double precision not null default 40 check (gun_damage >= 0),
+  gun_range_m      double precision not null default 1500 check (gun_range_m >= 0),
+  squadron_size    integer not null default 12 check (squadron_size between 1 and 100),
+  cost_per_aircraft integer not null default 10 check (cost_per_aircraft between 0 and 1000000),  -- SP for a replacement
+  asset_id         uuid references public.assets (id),
+  sidc             text check (sidc is null or sidc ~ '^[A-Za-z0-9*-]{10,30}$'),
+  deleted_at       timestamptz,
+  created_at       timestamptz not null default now()
+);
+create index if not exists airframes_map_idx on public.airframes (map_id);
+
+-- Each family (IR, ARH, HARM, AGM, ...) is its own chain in the tech tree: one tech item per tier.
+create table if not exists public.air_weapon_families (
+  id         uuid primary key default gen_random_uuid(),
+  map_id     uuid not null references public.maps (id) on delete cascade,
+  name       text not null check (char_length(name) between 1 and 40),
+  guidance   text not null default 'radar' check (guidance in ('radar', 'ir', 'harm', 'agm', 'none')),
+  color      text check (color is null or color ~ '^#[0-9a-fA-F]{6}$'),
+  sort       integer not null default 0,
+  deleted_at timestamptz,
+  created_at timestamptz not null default now()
+);
+create index if not exists air_weapon_families_map_idx on public.air_weapon_families (map_id);
+
+create table if not exists public.air_weapons (
+  id           uuid primary key default gen_random_uuid(),
+  map_id       uuid not null references public.maps (id) on delete cascade,
+  family_id    uuid not null references public.air_weapon_families (id) on delete cascade,
+  tier         integer not null default 1 check (tier between 1 and 20),
+  name         text not null check (char_length(name) between 1 and 80),
+  guidance     text not null default 'radar' check (guidance in ('radar', 'ir', 'harm', 'agm', 'none')),
+  accuracy     double precision not null default 70 check (accuracy between 0 and 100),
+  range_m      double precision not null default 50000 check (range_m >= 0),
+  damage       double precision not null default 100 check (damage >= 0),
+  ap           double precision not null default 10 check (ap >= 0),
+  weight       double precision not null default 150 check (weight >= 0),      -- kg
+  slots        integer not null default 1 check (slots between 1 and 20),      -- hardpoints it takes
+  targets      text[] not null default '{air}',                                -- air, ground, ship, radar
+  tech_item_id uuid,                                                           -- the research node that unlocks it
+  deleted_at   timestamptz,
+  created_at   timestamptz not null default now()
+);
+create index if not exists air_weapons_map_idx on public.air_weapons (map_id);
+
+-- A squadron: aircraft of one airframe at one base. damage carries over below one airframe's HP.
+-- base_feature_id is cleared when the base is destroyed: the squadron is stranded until rebased.
+create table if not exists public.squadrons (
+  id              uuid primary key default gen_random_uuid(),
+  map_id          uuid not null references public.maps (id) on delete cascade,
+  owner_player_id uuid references public.players (id) on delete set null,
+  name            text not null check (char_length(name) between 1 and 80),
+  airframe_id     uuid not null references public.airframes (id),
+  base_feature_id uuid references public.features (id) on delete set null,
+  aircraft        integer not null default 12 check (aircraft >= 0),
+  max_aircraft    integer not null default 12 check (max_aircraft >= 1),
+  damage          double precision not null default 0 check (damage >= 0),
+  loadout         jsonb not null default '[]' check (octet_length(loadout::text) < 4000),   -- [{"weapon": id, "count": n}] per aircraft
+  created_at      timestamptz not null default now()
+);
+create index if not exists squadrons_map_idx on public.squadrons (map_id);
+
+-- What a recon mission showed a player, until the next push.
+create table if not exists public.air_reveals (
+  id          uuid primary key default gen_random_uuid(),
+  map_id      uuid not null references public.maps (id) on delete cascade,
+  player_id   uuid not null references public.players (id) on delete cascade,
+  turn_number integer not null,
+  center      double precision[] not null,
+  radius_m    double precision not null
+);
+create index if not exists air_reveals_idx on public.air_reveals (player_id, turn_number);
+
+alter table public.unit_templates
+  add column if not exists air_capacity integer not null default 0 check (air_capacity between 0 and 100),   -- squadrons it can base (airbase)
+  add column if not exists aps double precision not null default 0 check (aps between 0 and 100);          -- active protection vs AGMs
+alter table public.weapon_profiles
+  add column if not exists anti_air   boolean not null default false,
+  add column if not exists guidance   text not null default 'none' check (guidance in ('none', 'radar', 'ir', 'gun')),
+  add column if not exists accuracy   double precision not null default 60 check (accuracy between 0 and 100),
+  add column if not exists air_damage double precision not null default 50 check (air_damage >= 0),
+  add column if not exists air_shots  integer not null default 2 check (air_shots between 0 and 100);
+alter table public.tech_items add column if not exists airframe_id uuid;   -- category 'squadron': buying it raises a new squadron
+alter table public.tech_items drop constraint if exists tech_items_category_check;
+alter table public.tech_items add constraint tech_items_category_check check (category in ('unit', 'building', 'weapon', 'squadron'));
+
 alter table public.players
   add column if not exists spawn_points    integer not null default 0,
   add column if not exists research_points integer not null default 0,
@@ -587,7 +692,8 @@ as $$
       'units', coalesce((select jsonb_object_agg(u.feature_id, jsonb_build_object('strength', u.strength, 'experience', u.experience,
                            'stationary_turns', u.stationary_turns)) from public.unit_state u where u.map_id = p_map_id), '{}'::jsonb),
       'engagements', coalesce((select jsonb_agg(to_jsonb(e) - 'map_id' - 'updated_at') from public.engagements e
-                                where e.map_id = p_map_id and e.status = 'active'), '[]'::jsonb))
+                                where e.map_id = p_map_id and e.status = 'active'), '[]'::jsonb),
+      'squadrons', coalesce((select jsonb_agg(to_jsonb(q) - 'map_id') from public.squadrons q where q.map_id = p_map_id), '[]'::jsonb))
   );
 $$;
 
@@ -721,6 +827,7 @@ as $$
      and private.num_in(props -> 'fontSize', 8, 96)
      and (props -> 'tint' is null or props -> 'tint' = 'null'::jsonb or private.str_ok(props -> 'tint', 7, '^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$'))
      and (props -> 'showLabel' is null or jsonb_typeof(props -> 'showLabel') = 'boolean')
+     and (props -> 'emit' is null or jsonb_typeof(props -> 'emit') = 'boolean')
      and private.str_ok(props -> 'tech', 36, '^[0-9a-f-]{36}$')
      and private.str_ok(props -> 'unit', 36, '^[0-9a-f-]{36}$')
      and private.str_ok(props -> 'made_by', 36, '^[0-9a-f-]{36}$')
@@ -831,7 +938,10 @@ as $$
       'props', private.pick(j -> 'props', array['name', 'type', 'heading', 'speed', 'notes', 'timestamp', 'sidc',
                                                 'sizeMode', 'sizePx', 'sizeM', 'tint', 'showLabel', 'radius', 'fontSize']),
       'style', private.pick(j -> 'style', array['color', 'width', 'dash', 'fillOpacity']))
-    when 'update' then private.pick(j, array['geometry', 'heading', 'order', 'attacks', 'retreat'])
+    when 'update' then private.pick(j, array['geometry', 'heading', 'order', 'attacks', 'retreat', 'emit'])
+    when 'mission' then private.pick(j, array['type', 'target', 'target_unit', 'escort_of', 'radius_m'])
+    when 'buy_aircraft' then private.pick(j, array['squadron', 'count'])
+    when 'buy_squadron' then private.pick(j, array['purchase_id', 'base', 'name'])
     else '{}'::jsonb
   end;
 $$;
@@ -894,6 +1004,7 @@ declare
   f public.features;
   a public.allocations;
   it public.tech_items;
+  sq public.squadrons;
   k text;
   want text;
   r float8;
@@ -990,8 +1101,11 @@ begin
       raise exception 'object is not assigned to this player' using errcode = '42501';
     end if;
     if p_op = 'update' then
-      if j = '{}'::jsonb or exists (select 1 from jsonb_object_keys(j) key where key not in ('geometry', 'heading', 'order', 'attacks', 'retreat')) then
-        raise exception 'a draft can change position, heading, orders, attacks and retreat only' using errcode = '42501';
+      if j = '{}'::jsonb or exists (select 1 from jsonb_object_keys(j) key where key not in ('geometry', 'heading', 'order', 'attacks', 'retreat', 'emit')) then
+        raise exception 'a draft can change position, heading, orders, attacks, retreat and radar only' using errcode = '42501';
+      end if;
+      if j ? 'emit' and jsonb_typeof(j -> 'emit') <> 'boolean' then
+        raise exception 'invalid radar setting' using errcode = '22023';
       end if;
       if j ? 'retreat' and jsonb_typeof(j -> 'retreat') <> 'boolean' then
         raise exception 'invalid retreat order' using errcode = '22023';
@@ -1026,6 +1140,49 @@ begin
       end if;
     end if;
 
+  elsif p_op = 'mission' then
+    perform private.check_mission(p, p_fid, j, strict);
+
+  elsif p_op = 'buy_aircraft' then
+    select * into sq from public.squadrons x where x.id = nullif(j ->> 'squadron', '')::uuid and x.map_id = p.map_id;
+    if not found or (strict and sq.owner_player_id is distinct from p.id) then
+      raise exception 'that squadron is not yours' using errcode = '42501';
+    end if;
+    if jsonb_typeof(j -> 'count') <> 'number' or (j ->> 'count')::integer < 1 then
+      raise exception 'buy at least one aircraft' using errcode = '22023';
+    end if;
+    if strict and sq.aircraft + (j ->> 'count')::integer > sq.max_aircraft then
+      raise exception '% has room for % more aircraft', sq.name, sq.max_aircraft - sq.aircraft using errcode = '42501';
+    end if;
+    if strict and sq.base_feature_id is null then
+      raise exception '% has no base: replacements need a base to arrive at', sq.name using errcode = '42501';
+    end if;
+
+  elsif p_op = 'buy_squadron' then
+    select * into it from public.tech_items x where x.id = nullif(j ->> 'purchase_id', '')::uuid and x.map_id = p.map_id;
+    if not found or it.category <> 'squadron' or not it.buyable or it.airframe_id is null then
+      raise exception 'that is not a squadron you can buy' using errcode = '42501';
+    end if;
+    if strict and not private.unlocked(p, it, t.number) then
+      raise exception '% is not researched yet', it.name using errcode = '42501';
+    end if;
+    if exists (select 1 from public.squadrons x where x.id = p_fid) then
+      raise exception 'squadron id already exists' using errcode = '22023';
+    end if;
+    if not private.str_ok(j -> 'name', 80) then
+      raise exception 'invalid squadron name' using errcode = '22023';
+    end if;
+    select * into f from public.features x where x.id = nullif(j ->> 'base', '')::uuid and x.map_id = p.map_id;
+    if not found or (strict and f.owner_player_id is distinct from p.id) then
+      raise exception 'new squadrons need one of your own airbases' using errcode = '42501';
+    end if;
+    if private.base_capacity(f) <= 0 then
+      raise exception 'that unit is not an airbase' using errcode = '42501';
+    end if;
+    if strict and (select count(*) from public.squadrons x where x.base_feature_id = f.id) >= private.base_capacity(f) then
+      raise exception 'that airbase is full (% squadrons)', private.base_capacity(f) using errcode = '42501';
+    end if;
+
   else
     raise exception 'invalid op' using errcode = '22023';
   end if;
@@ -1051,15 +1208,22 @@ as $$
          case when c ->> 'op' = 'research' then 'research' else 'buy' end
   from jsonb_array_elements(p_changes) c
   where not ((c ->> 'feature_id')::uuid = any (p_rejected))
-    and (c ->> 'op' = 'research' or (c ->> 'op' = 'create' and nullif(c -> 'payload' ->> 'purchase_id', '') is not null));
+    and (c ->> 'op' = 'research' or (c ->> 'op' in ('create', 'buy_squadron') and nullif(c -> 'payload' ->> 'purchase_id', '') is not null));
 $$;
 
 -- Per change: the item and which price applies. Research costs research points, a purchase spawn points.
 create function private.draft_costs(p_changes jsonb, p_rejected uuid[]) returns table (item_id uuid, spawn bigint, research bigint)
 language sql stable set search_path = ''
 as $$
-  select d.item_id, case when d.kind = 'buy' then t.spawn_cost else 0 end, case when d.kind = 'research' then t.research_cost else 0 end
-  from private.draft_items(p_changes, p_rejected) d join public.tech_items t on t.id = d.item_id;
+  select d.item_id, case when d.kind = 'buy' then t.spawn_cost else 0 end::bigint, case when d.kind = 'research' then t.research_cost else 0 end::bigint
+  from private.draft_items(p_changes, p_rejected) d join public.tech_items t on t.id = d.item_id
+  union all
+  -- Replacement aircraft: the airframe's price per aircraft.
+  select null::uuid, (a.cost_per_aircraft * greatest(0, (c -> 'payload' ->> 'count')::integer))::bigint, 0::bigint
+  from jsonb_array_elements(p_changes) c
+  join public.squadrons sq on sq.id::text = c -> 'payload' ->> 'squadron'
+  join public.airframes a on a.id = sq.airframe_id
+  where c ->> 'op' = 'buy_aircraft' and not ((c ->> 'feature_id')::uuid = any (p_rejected));
 $$;
 
 -- Validate a whole draft and return it in stored form. Changes listed in p_rejected are kept but
@@ -1154,6 +1318,25 @@ begin
         raise exception 'allocation used up: % of % already taken by your team', least(quota, others), quota using errcode = '42501';
       end if;
     end loop;
+    if exists (select 1 from jsonb_array_elements(result) e where e ->> 'op' = 'buy_aircraft' and not ((e ->> 'feature_id')::uuid = any (p_rejected))
+               group by e -> 'payload' ->> 'squadron' having count(*) > 1) then
+      raise exception 'buy replacements for a squadron in one order' using errcode = '22023';
+    end if;
+    if exists (select 1 from jsonb_array_elements(result) e
+               where e ->> 'op' = 'mission' and e -> 'payload' ->> 'type' = 'escort' and not ((e ->> 'feature_id')::uuid = any (p_rejected))
+                 and not exists (select 1 from jsonb_array_elements(result) x
+                                 where x ->> 'op' = 'mission' and x ->> 'feature_id' = e -> 'payload' ->> 'escort_of'
+                                   and x -> 'payload' ->> 'type' = 'strike' and not ((x ->> 'feature_id')::uuid = any (p_rejected)))) then
+      raise exception 'an escort needs one of your strikes this turn to escort' using errcode = '42501';
+    end if;
+    if exists (select 1 from jsonb_array_elements(result) e
+               join public.features b on b.id::text = e -> 'payload' ->> 'base'
+               where e ->> 'op' = 'buy_squadron' and not ((e ->> 'feature_id')::uuid = any (p_rejected))
+               group by b.id, b.kind, b.asset_id, b.props, b.map_id
+               having count(*) + (select count(*) from public.squadrons x where x.base_feature_id = b.id)
+                      > private.template_capacity(b.map_id, b.kind, b.asset_id, b.props)) then
+      raise exception 'an airbase cannot take that many new squadrons' using errcode = '42501';
+    end if;
     select coalesce(sum(c.spawn), 0), coalesce(sum(c.research), 0) into cost_s, cost_r
       from private.draft_costs(result, p_rejected) c;
     if cost_s > p.spawn_points then
@@ -1184,6 +1367,22 @@ begin
       update public.players x set spawn_points = x.spawn_points - t.spawn_cost
         from public.tech_items t where t.id = (j ->> 'purchase_id')::uuid and x.id = p.id;
     end if;
+  elsif c ->> 'op' = 'mission' then
+    null;   -- flown in the combat phase
+  elsif c ->> 'op' = 'buy_aircraft' then
+    update public.players x set spawn_points = x.spawn_points - a.cost_per_aircraft * (j ->> 'count')::integer
+      from public.squadrons sq join public.airframes a on a.id = sq.airframe_id
+     where sq.id = (j ->> 'squadron')::uuid and x.id = p.id;
+    update public.squadrons sq set aircraft = least(sq.max_aircraft, sq.aircraft + (j ->> 'count')::integer)
+     where sq.id = (j ->> 'squadron')::uuid and sq.map_id = p_map_id;
+  elsif c ->> 'op' = 'buy_squadron' then
+    insert into public.squadrons (id, map_id, owner_player_id, name, airframe_id, base_feature_id, aircraft, max_aircraft)
+    select fid, p_map_id, p.id, coalesce(nullif(trim(j ->> 'name'), ''), t.name), a.id, (j ->> 'base')::uuid, a.squadron_size, a.squadron_size
+    from public.tech_items t join public.airframes a on a.id = t.airframe_id
+    where t.id = (j ->> 'purchase_id')::uuid
+      and exists (select 1 from public.features b where b.id = (j ->> 'base')::uuid and b.map_id = p_map_id);
+    update public.players x set spawn_points = x.spawn_points - t.spawn_cost
+      from public.tech_items t where t.id = (j ->> 'purchase_id')::uuid and x.id = p.id;
   elsif c ->> 'op' = 'research' then
     update public.players x set research_points = x.research_points - t.research_cost,
                                 tech_unlocked = array_append(x.tech_unlocked, t.id)
@@ -1193,6 +1392,7 @@ begin
       geometry = coalesce(j -> 'geometry', ft.geometry),
       props = ft.props
         || case when j ? 'heading' then jsonb_build_object('heading', j -> 'heading') else '{}'::jsonb end
+        || case when j ? 'emit' then jsonb_build_object('emit', j -> 'emit') else '{}'::jsonb end
         || case when j ? 'order' then jsonb_build_object('notes', left(concat_ws(E'\n',
              nullif(ft.props ->> 'notes', ''), '[' || p.name || '] ' || (j ->> 'order')), 4000)) else '{}'::jsonb end
     where ft.id = fid and ft.map_id = p_map_id;
@@ -1237,6 +1437,18 @@ begin
       from jsonb_array_elements(s -> 'combat' -> 'engagements') e
     on conflict (id) do update set status = 'active', turns_engaged = excluded.turns_engaged, units = excluded.units,
       ended_turn = null, end_reason = null;
+    -- Squadrons (schema 10 and later): as they were, including ones raised since being removed.
+    if s -> 'combat' ? 'squadrons' then
+      delete from public.squadrons where map_id = p_map_id;
+      insert into public.squadrons (id, map_id, owner_player_id, name, airframe_id, base_feature_id, aircraft, max_aircraft, damage, loadout, created_at)
+        select (q ->> 'id')::uuid, p_map_id, (select pl.id from public.players pl where pl.id::text = q ->> 'owner_player_id' and pl.map_id = p_map_id),
+               q ->> 'name', (q ->> 'airframe_id')::uuid,
+               (select f.id from public.features f where f.id::text = q ->> 'base_feature_id' and f.map_id = p_map_id),
+               (q ->> 'aircraft')::integer, (q ->> 'max_aircraft')::integer, (q ->> 'damage')::float8, coalesce(q -> 'loadout', '[]'),
+               coalesce((q ->> 'created_at')::timestamptz, now())
+        from jsonb_array_elements(s -> 'combat' -> 'squadrons') q
+        where exists (select 1 from public.airframes a where a.id::text = q ->> 'airframe_id');
+    end if;
   end if;
 end $$;
 
@@ -2068,23 +2280,25 @@ begin
   end if;
   insert into public.tech_items (id, map_id, name, description, tier, sort, research_cost, spawn_cost, prereqs, buyable,
                                  asset_id, sidc, props, income_spawn, income_research, spawn_radius_m, placement, pos_x, pos_y,
-                                 category, can_move, spawn_from, move_range_m, release_turn, template_id)
+                                 category, can_move, spawn_from, move_range_m, release_turn, template_id, airframe_id)
   values (tid, p_map_id, trim(p ->> 'name'), nullif(trim(p ->> 'description'), ''), coalesce((p ->> 'tier')::integer, 1),
           coalesce((p ->> 'sort')::integer, 0), coalesce((p ->> 'research_cost')::integer, 0), coalesce((p ->> 'spawn_cost')::integer, 0),
-          pre, coalesce((p ->> 'buyable')::boolean, true), asset, case when asset is null then nullif(p ->> 'sidc', '') end, props,
+          pre, coalesce((p ->> 'buyable')::boolean, true), asset,
+          case when asset is null then coalesce(nullif(p ->> 'sidc', ''), case when p ->> 'category' = 'squadron' then 'SFAPMF---------' end) end, props,
           coalesce((p ->> 'income_spawn')::integer, 0), coalesce((p ->> 'income_research')::integer, 0),
           nullif((p ->> 'spawn_radius_m')::float8, 0), coalesce(p ->> 'placement', 'either'),
           (p ->> 'pos_x')::float8, (p ->> 'pos_y')::float8,
           coalesce(p ->> 'category', 'unit'), coalesce((p ->> 'can_move')::boolean, true), sfrom, (p ->> 'move_range_m')::float8,
           (p ->> 'release_turn')::integer,
-          (select x.id from public.unit_templates x where x.id = nullif(p ->> 'template_id', '')::uuid and x.map_id = p_map_id))
+          (select x.id from public.unit_templates x where x.id = nullif(p ->> 'template_id', '')::uuid and x.map_id = p_map_id),
+          (select x.id from public.airframes x where x.id = nullif(p ->> 'airframe_id', '')::uuid and x.map_id = p_map_id))
   on conflict (id) do update set name = excluded.name, description = excluded.description, tier = excluded.tier, sort = excluded.sort,
     research_cost = excluded.research_cost, spawn_cost = excluded.spawn_cost, prereqs = excluded.prereqs, buyable = excluded.buyable,
     asset_id = excluded.asset_id, sidc = excluded.sidc, props = excluded.props, income_spawn = excluded.income_spawn,
     income_research = excluded.income_research, spawn_radius_m = excluded.spawn_radius_m, placement = excluded.placement,
     pos_x = coalesce(excluded.pos_x, public.tech_items.pos_x), pos_y = coalesce(excluded.pos_y, public.tech_items.pos_y),
     category = excluded.category, can_move = excluded.can_move, spawn_from = excluded.spawn_from, move_range_m = excluded.move_range_m,
-    release_turn = excluded.release_turn, template_id = excluded.template_id;
+    release_turn = excluded.release_turn, template_id = excluded.template_id, airframe_id = excluded.airframe_id;
   -- No loops: an item may not (indirectly) require itself.
   if exists (
     with recursive up (id) as (
@@ -2191,6 +2405,22 @@ begin
    where id = p_player_id;
 end $$;
 
+-- Payload weight of a loadout (per aircraft), kg.
+create function private.loadout_weight(p_loadout jsonb) returns float8
+language sql stable set search_path = ''
+as $$
+  select coalesce(sum(w.weight * (l ->> 'count')::integer), 0)
+  from jsonb_array_elements(coalesce(p_loadout, '[]')) l join public.air_weapons w on w.id::text = l ->> 'weapon';
+$$;
+
+-- Combat radius with this loadout: base radius x (1 - penalty x payload / max payload).
+create function private.squadron_radius(sq public.squadrons, s jsonb) returns float8
+language sql stable set search_path = ''
+as $$
+  select a.radius_m * (1 - (s ->> 'radius_penalty')::float8 * least(1, private.loadout_weight(sq.loadout) / nullif(a.max_payload, 0)))
+  from public.airframes a where a.id = sq.airframe_id;
+$$;
+
 -- ---------------------------------------------------------------------------
 -- 7c. Ground combat
 -- The damage engine itself runs in the owner's browser (app/lib/combat.ts) on inputs built here,
@@ -2209,7 +2439,9 @@ as $$ select '{
   "rounds_max": 3, "parting_round": true, "recovery_pct": 10, "remove_destroyed": true,
   "intel_km": 100, "band_fresh": 0.9, "band_damaged": 0.6, "band_heavy": 0.3,
   "terrain": {"open": 1.0, "urban": 0.7, "forest": 0.8},
-  "terrain_min_km2": {"urban": 25, "forest": 50}
+  "terrain_min_km2": {"urban": 25, "forest": 50},
+  "hit_min": 5, "hit_max": 95, "radius_penalty": 0.4, "dark_penalty": 0.5,
+  "patrol_radius_km": 50, "patrol_radius_max_km": 200, "recon_radius_km": 25
 }'::jsonb $$;
 
 -- Settings in force on turn n: the defaults, overlaid by the newest saved version at or before n.
@@ -2325,7 +2557,8 @@ as $$
            private.anchor(f.geometry) as start,
            coalesce(private.anchor(u.pl -> 'geometry'), private.anchor(f.geometry)) as pos,
            coalesce((u.pl -> 'heading')::float8, (f.props ->> 'heading')::float8) as heading,
-           coalesce(u.pl -> 'attacks', '[]'::jsonb) as attacks, coalesce((u.pl ->> 'retreat')::boolean, false) as retreat, false as fresh
+           coalesce(u.pl -> 'attacks', '[]'::jsonb) as attacks, coalesce((u.pl ->> 'retreat')::boolean, false) as retreat, false as fresh,
+           coalesce((u.pl ->> 'emit')::boolean, (f.props ->> 'emit')::boolean, true) as emit
     from public.features f left join upd u on u.fid = f.id
     where f.map_id = t.map_id and f.kind in ('symbol', 'asset') and f.id not in (select fid from gone)
   ),
@@ -2333,11 +2566,11 @@ as $$
     select (a.c ->> 'feature_id')::uuid, a.player_id, a.c -> 'payload' -> 'props',
            private.template_for(t.map_id, a.c -> 'payload' ->> 'kind', nullif(a.c -> 'payload' ->> 'asset_id', '')::uuid, a.c -> 'payload' -> 'props'),
            private.anchor(a.c -> 'payload' -> 'geometry'), private.anchor(a.c -> 'payload' -> 'geometry'),
-           (a.c -> 'payload' -> 'props' ->> 'heading')::float8, '[]'::jsonb, false, true
+           (a.c -> 'payload' -> 'props' ->> 'heading')::float8, '[]'::jsonb, false, true, true
     from acc a where a.c ->> 'op' = 'create' and a.c -> 'payload' ->> 'kind' in ('symbol', 'asset')
   ),
   units as (
-    select x.*, tp.name as tname, tp.max_strength, tp.armor, tp.category, tp.weapon_ids
+    select x.*, tp.name as tname, tp.max_strength, tp.armor, tp.category, tp.weapon_ids, tp.aps, tp.air_capacity
     from (select * from existing union all select * from created) x
     join public.unit_templates tp on tp.id = x.tid
   )
@@ -2347,17 +2580,34 @@ as $$
     'units', coalesce((select jsonb_agg(jsonb_build_object(
         'id', u.id, 'name', coalesce(nullif(u.props ->> 'name', ''), u.tname), 'owner', u.owner,
         'side', coalesce(nullif((select pl.team from public.players pl where pl.id = u.owner), ''), u.owner::text, 'owner'),
-        'template', jsonb_build_object('id', u.tid, 'name', u.tname, 'max_strength', u.max_strength, 'armor', u.armor, 'category', u.category),
+        'template', jsonb_build_object('id', u.tid, 'name', u.tname, 'max_strength', u.max_strength, 'armor', u.armor, 'category', u.category,
+                                       'aps', u.aps, 'air_capacity', u.air_capacity),
         'weapons', coalesce((select jsonb_agg(jsonb_build_object('slot', w.n - 1, 'id', wp.id, 'name', wp.name, 'attacks', wp.attacks, 'ap', wp.ap,
-                               'range_m', wp.range_m, 'indirect', wp.indirect) order by w.n)
+                               'range_m', wp.range_m, 'indirect', wp.indirect, 'anti_air', wp.anti_air, 'guidance', wp.guidance,
+                               'accuracy', wp.accuracy, 'air_damage', wp.air_damage, 'air_shots', wp.air_shots) order by w.n)
                              from unnest(u.weapon_ids) with ordinality w (wid, n) join public.weapon_profiles wp on wp.id = w.wid and wp.deleted_at is null), '[]'::jsonb),
         'start', to_jsonb(u.start), 'pos', to_jsonb(u.pos),
         'moved', u.fresh or private.dist_m(u.start, u.pos) > 0.5,
         'heading', u.heading,
         'strength', coalesce(s.strength, u.max_strength), 'experience', coalesce(s.experience, 0), 'stationary_turns', coalesce(s.stationary_turns, 0),
         'terrain', private.terrain_at(t.map_id, u.pos),
-        'new', u.fresh, 'retreat', u.retreat, 'attacks', u.attacks) order by u.id)
+        'new', u.fresh, 'retreat', u.retreat, 'attacks', u.attacks, 'emit', u.emit) order by u.id)
       from units u left join public.unit_state s on s.feature_id = u.id), '[]'::jsonb),
+    -- Squadrons with their airframe, loadout, base position after movement, and this turn's mission.
+    'squadrons', coalesce((select jsonb_agg(jsonb_build_object(
+        'id', q.id, 'name', q.name, 'owner', q.owner_player_id,
+        'side', coalesce(nullif((select pl.team from public.players pl where pl.id = q.owner_player_id), ''), q.owner_player_id::text, 'owner'),
+        'airframe', to_jsonb(af) - 'map_id' - 'created_at' - 'deleted_at' - 'asset_id' - 'sidc',
+        'base', q.base_feature_id,
+        'base_pos', (select to_jsonb(coalesce(private.anchor(u2.pl -> 'geometry'), private.anchor(bf.geometry)))
+                     from public.features bf left join upd u2 on u2.fid = bf.id where bf.id = q.base_feature_id and bf.id not in (select fid from gone)),
+        'aircraft', q.aircraft, 'max', q.max_aircraft, 'damage', q.damage,
+        'loadout', coalesce((select jsonb_agg((to_jsonb(w) - 'map_id' - 'created_at' - 'deleted_at' - 'tech_item_id' - 'family_id') || jsonb_build_object('count', (l ->> 'count')::integer)
+                                              order by w.id)
+                             from jsonb_array_elements(q.loadout) l join public.air_weapons w on w.id::text = l ->> 'weapon' and w.deleted_at is null), '[]'::jsonb),
+        'radius_m', private.squadron_radius(q, private.combat_settings_for(t.map_id, t.number)),
+        'mission', (select a.c -> 'payload' from acc a where a.c ->> 'op' = 'mission' and (a.c ->> 'feature_id')::uuid = q.id limit 1)) order by q.id)
+      from public.squadrons q join public.airframes af on af.id = q.airframe_id where q.map_id = t.map_id), '[]'::jsonb),
     'engagements', coalesce((select jsonb_agg(jsonb_build_object('id', e.id, 'start_turn', e.start_turn, 'turns_engaged', e.turns_engaged, 'units', e.units) order by e.id)
       from public.engagements e where e.map_id = t.map_id and e.status = 'active'), '[]'::jsonb));
 $$;
@@ -2411,7 +2661,8 @@ end $$;
 create function private.combat_needed(t public.turns) returns boolean
 language sql stable set search_path = ''
 as $$ select jsonb_array_length(private.combat_inputs(t) -> 'units') > 0
-          or exists (select 1 from public.engagements e where e.map_id = t.map_id and e.status = 'active'); $$;
+          or exists (select 1 from public.engagements e where e.map_id = t.map_id and e.status = 'active')
+          or exists (select 1 from public.squadrons q where q.map_id = t.map_id); $$;
 
 create function private.band(ratio float8, s jsonb) returns text
 language sql immutable set search_path = ''
@@ -2447,6 +2698,16 @@ begin
     on conflict (feature_id) do update set strength = excluded.strength, experience = excluded.experience,
       stationary_turns = excluded.stationary_turns, updated_at = now();
   end loop;
+  -- Air: aircraft lost and damage carried per squadron; recon reveals for the next turn.
+  for u in select * from jsonb_array_elements(coalesce(res -> 'air' -> 'squadrons', '[]')) loop
+    -- Losses as a difference: replacements bought this turn were added already and must not be overwritten.
+    update public.squadrons q set aircraft = greatest(0, q.aircraft - greatest(0, (u ->> 'lost')::integer)), damage = greatest(0, (u ->> 'damage')::float8)
+     where q.id = (u ->> 'id')::uuid and q.map_id = t.map_id;
+  end loop;
+  insert into public.air_reveals (map_id, player_id, turn_number, center, radius_m)
+    select t.map_id, (r ->> 'owner')::uuid, t.number, array[(r -> 'center' ->> 0)::float8, (r -> 'center' ->> 1)::float8], (r ->> 'radius_m')::float8
+    from jsonb_array_elements(coalesce(res -> 'air' -> 'reveals', '[]')) r
+    where exists (select 1 from public.players pr where pr.id::text = r ->> 'owner' and pr.map_id = t.map_id);
   for e in select * from jsonb_array_elements(res -> 'engagements') loop
     insert into public.engagements (id, map_id, status, start_turn, turns_engaged, ended_turn, end_reason, units, updated_at)
     values ((e ->> 'id')::uuid, t.map_id, e ->> 'status', (e ->> 'start_turn')::integer, (e ->> 'turns_engaged')::integer,
@@ -2484,7 +2745,7 @@ begin
           where x ->> 'owner' is distinct from pl.id::text and e -> 'units' @> jsonb_build_array(jsonb_build_object('fid', x ->> 'id'))), '[]')));
     end loop;
     insert into public.combat_reports (map_id, turn_number, player_id, report)
-    values (t.map_id, t.number, pl.id, jsonb_build_object('turn', t.number, 'own', own, 'engagements', engs))
+    values (t.map_id, t.number, pl.id, jsonb_build_object('turn', t.number, 'own', own, 'engagements', engs, 'air', private.air_report(t, pl, res, s)))
     on conflict (player_id, turn_number) do update set report = excluded.report;
   end loop;
 end $$;
@@ -2496,7 +2757,7 @@ language sql stable set search_path = ''
 as $$
   with s as (select private.combat_settings_for(p.map_id, private.current_turn_number(p.map_id)) as v),
   u as (
-    select f.id, f.owner_player_id, private.anchor(f.geometry) as pos, f.layer_id, tp.name, tp.category, tp.max_strength, tp.weapon_ids,
+    select f.id, f.owner_player_id, private.anchor(f.geometry) as pos, f.layer_id, f.props, tp.name, tp.category, tp.max_strength, tp.weapon_ids,
            st.strength, st.experience, st.stationary_turns
     from public.features f
     join public.unit_templates tp on tp.id = private.template_for(f.map_id, f.kind, f.asset_id, f.props)
@@ -2515,6 +2776,9 @@ as $$
     'own', coalesce((select jsonb_object_agg(m.id, jsonb_build_object(
         'template', m.name, 'category', m.category, 'max', m.max_strength, 'strength', coalesce(m.strength, m.max_strength),
         'experience', coalesce(m.experience, 0), 'stationary_turns', coalesce(m.stationary_turns, 0), 'engaged', private.engaged(m.id),
+        'radar_aa', exists (select 1 from unnest(m.weapon_ids) w2 join public.weapon_profiles wp2 on wp2.id = w2 where wp2.anti_air and wp2.guidance = 'radar'),
+        'anti_air', exists (select 1 from unnest(m.weapon_ids) w2 join public.weapon_profiles wp2 on wp2.id = w2 where wp2.anti_air),
+        'emit', coalesce((m.props ->> 'emit')::boolean, true),
         -- Weapon names and ranges only: enough to pick targets, never attacks or AP.
         'weapons', coalesce((select jsonb_agg(jsonb_build_object('slot', w.n - 1, 'name', wp.name, 'range_m', wp.range_m, 'indirect', wp.indirect) order by w.n)
                              from unnest(m.weapon_ids) with ordinality w (wid, n) join public.weapon_profiles wp on wp.id = w.wid and wp.deleted_at is null), '[]'::jsonb)))
@@ -2569,12 +2833,19 @@ begin
   if exists (select 1 from public.weapon_profiles w where w.id = wid and w.map_id <> p_map_id) then
     raise exception 'weapon is on another map' using errcode = '42501';
   end if;
-  insert into public.weapon_profiles (id, map_id, name, attacks, ap, range_m, indirect, deleted_at)
+  insert into public.weapon_profiles (id, map_id, name, attacks, ap, range_m, indirect, deleted_at, anti_air, guidance, accuracy, air_damage, air_shots)
   values (wid, p_map_id, trim(p ->> 'name'), coalesce((p ->> 'attacks')::float8, 100), coalesce((p ->> 'ap')::float8, 10),
           coalesce((p ->> 'range_m')::float8, 3000), coalesce((p ->> 'indirect')::boolean, false),
-          case when coalesce((p ->> 'deleted')::boolean, false) then now() end)
+          case when coalesce((p ->> 'deleted')::boolean, false) then now() end,
+          coalesce((p ->> 'anti_air')::boolean, false), coalesce(p ->> 'guidance', 'none'), coalesce((p ->> 'accuracy')::float8, 60),
+          coalesce((p ->> 'air_damage')::float8, 50), coalesce((p ->> 'air_shots')::integer, 2))
   on conflict (id) do update set name = excluded.name, attacks = excluded.attacks, ap = excluded.ap, range_m = excluded.range_m,
-    indirect = excluded.indirect, deleted_at = case when p ? 'deleted' then excluded.deleted_at else public.weapon_profiles.deleted_at end;
+    indirect = excluded.indirect, deleted_at = case when p ? 'deleted' then excluded.deleted_at else public.weapon_profiles.deleted_at end,
+    anti_air = case when p ? 'anti_air' then excluded.anti_air else public.weapon_profiles.anti_air end,
+    guidance = case when p ? 'guidance' then excluded.guidance else public.weapon_profiles.guidance end,
+    accuracy = case when p ? 'accuracy' then excluded.accuracy else public.weapon_profiles.accuracy end,
+    air_damage = case when p ? 'air_damage' then excluded.air_damage else public.weapon_profiles.air_damage end,
+    air_shots = case when p ? 'air_shots' then excluded.air_shots else public.weapon_profiles.air_shots end;
   return wid;
 end $$;
 
@@ -2597,13 +2868,16 @@ begin
   if asset is not null and not exists (select 1 from public.assets where id = asset) then
     raise exception 'unknown graphic' using errcode = '22023';
   end if;
-  insert into public.unit_templates (id, map_id, name, max_strength, armor, category, asset_id, sidc, weapon_ids, deleted_at)
+  insert into public.unit_templates (id, map_id, name, max_strength, armor, category, asset_id, sidc, weapon_ids, deleted_at, air_capacity, aps)
   values (tid, p_map_id, trim(p ->> 'name'), coalesce((p ->> 'max_strength')::float8, 1000), coalesce((p ->> 'armor')::float8, 0),
           coalesce(p ->> 'category', 'ground'), asset, case when asset is null then nullif(p ->> 'sidc', '') end, wids,
-          case when coalesce((p ->> 'deleted')::boolean, false) then now() end)
+          case when coalesce((p ->> 'deleted')::boolean, false) then now() end,
+          coalesce((p ->> 'air_capacity')::integer, 0), coalesce((p ->> 'aps')::float8, 0))
   on conflict (id) do update set name = excluded.name, max_strength = excluded.max_strength, armor = excluded.armor, category = excluded.category,
     asset_id = excluded.asset_id, sidc = excluded.sidc, weapon_ids = excluded.weapon_ids,
-    deleted_at = case when p ? 'deleted' then excluded.deleted_at else public.unit_templates.deleted_at end;
+    deleted_at = case when p ? 'deleted' then excluded.deleted_at else public.unit_templates.deleted_at end,
+    air_capacity = case when p ? 'air_capacity' then excluded.air_capacity else public.unit_templates.air_capacity end,
+    aps = case when p ? 'aps' then excluded.aps else public.unit_templates.aps end;
   return tid;
 end $$;
 
@@ -2778,6 +3052,430 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------------------
+-- 7d. Air combat: squadrons, loadouts, missions, admin
+-- ---------------------------------------------------------------------------
+
+-- Squadrons a unit can base: its template's air capacity (0 = not an airbase).
+create function private.template_capacity(p_map_id uuid, p_kind text, p_asset uuid, p_props jsonb) returns integer
+language sql stable set search_path = ''
+as $$ select coalesce((select t.air_capacity from public.unit_templates t where t.id = private.template_for(p_map_id, p_kind, p_asset, p_props)), 0); $$;
+
+create function private.base_capacity(f public.features) returns integer
+language sql stable set search_path = ''
+as $$ select private.template_capacity(f.map_id, f.kind, f.asset_id, f.props); $$;
+
+-- A loadout fits the airframe (hardpoints, payload) and, for a player, uses only researched missiles.
+create function private.check_loadout(p public.players, a public.airframes, l jsonb, n integer) returns void
+language plpgsql stable set search_path = ''
+as $$
+declare
+  e jsonb;
+  w public.air_weapons;
+  ti public.tech_items;
+  slots integer := 0;
+  weight float8 := 0;
+  seen uuid[] := '{}';
+begin
+  if jsonb_typeof(l) <> 'array' or jsonb_array_length(l) > 20 then
+    raise exception 'invalid loadout' using errcode = '22023';
+  end if;
+  for e in select * from jsonb_array_elements(l) loop
+    if jsonb_typeof(e -> 'count') <> 'number' or (e ->> 'count')::integer < 1 or (e ->> 'count')::integer > 50 then
+      raise exception 'invalid loadout' using errcode = '22023';
+    end if;
+    select * into w from public.air_weapons x where x.id = nullif(e ->> 'weapon', '')::uuid and x.map_id = a.map_id and x.deleted_at is null;
+    if not found or w.id = any (seen) then
+      raise exception 'unknown weapon in the loadout' using errcode = '22023';
+    end if;
+    seen := seen || w.id;
+    if p.id is not null and w.tech_item_id is not null then
+      select * into ti from public.tech_items x where x.id = w.tech_item_id;
+      if found and not private.unlocked(p, ti, n) then
+        raise exception '% is not researched yet', w.name using errcode = '42501';
+      end if;
+    end if;
+    slots := slots + w.slots * (e ->> 'count')::integer;
+    weight := weight + w.weight * (e ->> 'count')::integer;
+  end loop;
+  if slots > a.hardpoints then
+    raise exception 'that loadout needs % hardpoints; the % has %', slots, a.name, a.hardpoints using errcode = '42501';
+  end if;
+  if weight > a.max_payload then
+    raise exception 'that loadout weighs % kg; the % carries at most % kg', round(weight), a.name, round(a.max_payload) using errcode = '42501';
+  end if;
+end $$;
+
+-- One mission per squadron per turn: strike (an enemy unit), patrol (a circle), escort (one of your strikes), recon (a point).
+create function private.check_mission(p public.players, p_fid uuid, j jsonb, strict boolean) returns void
+language plpgsql stable set search_path = ''
+as $$
+declare
+  sq public.squadrons;
+  base public.features;
+  tgt public.features;
+  s jsonb := private.combat_settings_for(p.map_id, private.current_turn_number(p.map_id));
+  pos float8[];
+  d float8;
+  r float8;
+  kind text := j ->> 'type';
+begin
+  select * into sq from public.squadrons x where x.id = p_fid and x.map_id = p.map_id;
+  if not found or (strict and sq.owner_player_id is distinct from p.id) then
+    raise exception 'that squadron is not yours' using errcode = '42501';
+  end if;
+  if kind is null or kind not in ('strike', 'patrol', 'escort', 'recon') then
+    raise exception 'unknown mission type' using errcode = '22023';
+  end if;
+  if kind = 'escort' then
+    if nullif(j ->> 'escort_of', '') is null or (j ->> 'escort_of')::uuid = p_fid then
+      raise exception 'pick the strike to escort' using errcode = '22023';
+    end if;
+  elsif kind = 'strike' then
+    select * into tgt from public.features x where x.id = nullif(j ->> 'target_unit', '')::uuid and x.map_id = p.map_id;
+    if not found then raise exception 'pick an enemy unit to strike' using errcode = '22023'; end if;
+    pos := private.anchor(tgt.geometry);
+    if strict and tgt.owner_player_id = p.id then
+      raise exception 'you cannot strike your own unit' using errcode = '42501';
+    end if;
+    if strict and not exists (select 1 from public.unit_templates x where x.id = private.template_for(tgt.map_id, tgt.kind, tgt.asset_id, tgt.props) and x.category = 'ground') then
+      raise exception 'that target cannot be struck (ground units only for now)' using errcode = '42501';
+    end if;
+    if strict and not exists (select 1 from public.layers l where l.id = tgt.layer_id and l.visible and (p.visible_layers is null or l.id = any (p.visible_layers))) then
+      raise exception 'that target is not visible to you' using errcode = '42501';
+    end if;
+  else
+    if not private.valid_pos(j -> 'target') then raise exception 'pick a point on the map' using errcode = '22023'; end if;
+    pos := array[(j -> 'target' ->> 0)::float8, (j -> 'target' ->> 1)::float8];
+    if kind = 'patrol' and j ? 'radius_m' and not private.num_in(j -> 'radius_m', 1000, (s ->> 'patrol_radius_max_km')::float8 * 1000) then
+      raise exception 'a patrol circle is between 1 and % km', (s ->> 'patrol_radius_max_km') using errcode = '22023';
+    end if;
+  end if;
+  if not strict then return; end if;
+  if sq.aircraft < 1 then
+    raise exception '% has no aircraft left: buy replacements first', sq.name using errcode = '42501';
+  end if;
+  select * into base from public.features x where x.id = sq.base_feature_id;
+  if not found then
+    raise exception '% has no base (it was destroyed): ask the owner to rebase it', sq.name using errcode = '42501';
+  end if;
+  if pos is not null then
+    d := private.dist_m(private.anchor(base.geometry), pos);
+    r := private.squadron_radius(sq, s);
+    if d > r * 1.001 + 1 then
+      raise exception '% reaches % km with this loadout; that target is % km from its base', sq.name, round(r / 1000), round(d / 1000) using errcode = '42501';
+    end if;
+  end if;
+end $$;
+
+-- A player sets a squadron's loadout. Free and instant while the turn is open (or between turns).
+create function public.set_loadout(p_player_id uuid, p_squadron_id uuid, p_loadout jsonb) returns jsonb
+language plpgsql volatile security definer set search_path = ''
+as $$
+declare
+  p public.players := private.me(p_player_id);
+  sq public.squadrons;
+  a public.airframes;
+  t public.turns;
+begin
+  if p.id is null then raise exception 'not a player on this map' using errcode = '42501'; end if;
+  select * into sq from public.squadrons x where x.id = p_squadron_id and x.map_id = p.map_id and x.owner_player_id = p.id for update;
+  if not found then raise exception 'that squadron is not yours' using errcode = '42501'; end if;
+  t := private.active_turn(p.map_id);
+  if t.status = 'locked' then raise exception 'the turn is locked for review' using errcode = 'P0001'; end if;
+  select * into a from public.airframes where id = sq.airframe_id;
+  perform private.check_loadout(p, a, coalesce(p_loadout, '[]'), private.current_turn_number(p.map_id));
+  update public.squadrons set loadout = coalesce(p_loadout, '[]') where id = sq.id returning * into sq;
+  return jsonb_build_object('radius_m', private.squadron_radius(sq, private.combat_settings_for(p.map_id, private.current_turn_number(p.map_id))),
+                            'weight', private.loadout_weight(sq.loadout));
+end $$;
+
+-- ---- owner ----
+
+create function public.get_air_admin(p_map_id uuid) returns jsonb
+language plpgsql stable security definer set search_path = ''
+as $$
+declare s jsonb;
+begin
+  perform private.need_map(p_map_id);
+  s := private.combat_settings_for(p_map_id, private.current_turn_number(p_map_id));
+  return jsonb_build_object(
+    'airframes', coalesce((select jsonb_agg(to_jsonb(a) - 'map_id' order by a.created_at) from public.airframes a where a.map_id = p_map_id), '[]'::jsonb),
+    'families', coalesce((select jsonb_agg(to_jsonb(f) - 'map_id' order by f.sort, f.created_at) from public.air_weapon_families f where f.map_id = p_map_id), '[]'::jsonb),
+    'weapons', coalesce((select jsonb_agg((to_jsonb(w) - 'map_id') || jsonb_build_object('research_cost', ti.research_cost, 'release_turn', ti.release_turn)
+                                          order by w.tier, w.created_at)
+                         from public.air_weapons w left join public.tech_items ti on ti.id = w.tech_item_id where w.map_id = p_map_id), '[]'::jsonb),
+    'squadrons', coalesce((select jsonb_agg((to_jsonb(q) - 'map_id') || jsonb_build_object('radius_m', private.squadron_radius(q, s),
+                                            'weight', private.loadout_weight(q.loadout)) order by q.created_at)
+                           from public.squadrons q where q.map_id = p_map_id), '[]'::jsonb),
+    'bases', coalesce((select jsonb_agg(jsonb_build_object('id', f.id, 'name', coalesce(nullif(f.props ->> 'name', ''), 'Airbase'), 'owner', f.owner_player_id,
+                         'capacity', private.base_capacity(f), 'pos', to_jsonb(private.anchor(f.geometry)),
+                         'used', (select count(*) from public.squadrons q where q.base_feature_id = f.id)))
+                       from public.features f where f.map_id = p_map_id and f.kind in ('symbol', 'asset') and private.base_capacity(f) > 0), '[]'::jsonb));
+end $$;
+
+-- p: id, name, hp, hardpoints, max_payload, radius_m, radar_m, signature, ecm, flares, maneuver, gun_accuracy, gun_damage,
+-- gun_range_m, squadron_size, cost_per_aircraft, asset_id or sidc, deleted.
+create function public.save_airframe(p_map_id uuid, p jsonb) returns uuid
+language plpgsql volatile security definer set search_path = ''
+as $$
+declare
+  aid uuid := coalesce(nullif(p ->> 'id', '')::uuid, gen_random_uuid());
+  r public.airframes;
+begin
+  perform private.need_map(p_map_id);
+  if exists (select 1 from public.airframes x where x.id = aid and x.map_id <> p_map_id) then
+    raise exception 'airframe is on another map' using errcode = '42501';
+  end if;
+  r := jsonb_populate_record(null::public.airframes, (private.pick(p, array['name', 'hp', 'hardpoints', 'max_payload', 'radius_m', 'radar_m', 'signature',
+         'ecm', 'flares', 'maneuver', 'gun_accuracy', 'gun_damage', 'gun_range_m', 'squadron_size', 'cost_per_aircraft', 'asset_id', 'sidc'])));
+  insert into public.airframes (id, map_id, name, hp, hardpoints, max_payload, radius_m, radar_m, signature, ecm, flares, maneuver,
+                                gun_accuracy, gun_damage, gun_range_m, squadron_size, cost_per_aircraft, asset_id, sidc, deleted_at)
+  values (aid, p_map_id, trim(r.name), coalesce(r.hp, 100), coalesce(r.hardpoints, 6), coalesce(r.max_payload, 6000), coalesce(r.radius_m, 600000),
+          coalesce(r.radar_m, 100000), coalesce(r.signature, 1), coalesce(r.ecm, 20), coalesce(r.flares, 20), coalesce(r.maneuver, 20),
+          coalesce(r.gun_accuracy, 40), coalesce(r.gun_damage, 40), coalesce(r.gun_range_m, 1500), coalesce(r.squadron_size, 12),
+          coalesce(r.cost_per_aircraft, 10), r.asset_id, case when r.asset_id is null then nullif(r.sidc, '') end,
+          case when coalesce((p ->> 'deleted')::boolean, false) then now() end)
+  on conflict (id) do update set name = excluded.name, hp = excluded.hp, hardpoints = excluded.hardpoints, max_payload = excluded.max_payload,
+    radius_m = excluded.radius_m, radar_m = excluded.radar_m, signature = excluded.signature, ecm = excluded.ecm, flares = excluded.flares,
+    maneuver = excluded.maneuver, gun_accuracy = excluded.gun_accuracy, gun_damage = excluded.gun_damage, gun_range_m = excluded.gun_range_m,
+    squadron_size = excluded.squadron_size, cost_per_aircraft = excluded.cost_per_aircraft, asset_id = excluded.asset_id, sidc = excluded.sidc,
+    deleted_at = case when p ? 'deleted' then excluded.deleted_at else public.airframes.deleted_at end;
+  return aid;
+end $$;
+
+-- p: id, name, guidance, color, sort, deleted.
+create function public.save_air_family(p_map_id uuid, p jsonb) returns uuid
+language plpgsql volatile security definer set search_path = ''
+as $$
+declare fid uuid := coalesce(nullif(p ->> 'id', '')::uuid, gen_random_uuid());
+begin
+  perform private.need_map(p_map_id);
+  if exists (select 1 from public.air_weapon_families x where x.id = fid and x.map_id <> p_map_id) then
+    raise exception 'family is on another map' using errcode = '42501';
+  end if;
+  insert into public.air_weapon_families (id, map_id, name, guidance, color, sort, deleted_at)
+  values (fid, p_map_id, trim(p ->> 'name'), coalesce(p ->> 'guidance', 'radar'), nullif(p ->> 'color', ''), coalesce((p ->> 'sort')::integer, 0),
+          case when coalesce((p ->> 'deleted')::boolean, false) then now() end)
+  on conflict (id) do update set name = excluded.name, guidance = excluded.guidance, color = excluded.color, sort = excluded.sort,
+    deleted_at = case when p ? 'deleted' then excluded.deleted_at else public.air_weapon_families.deleted_at end;
+  return fid;
+end $$;
+
+-- The four standard families, for a quick start. Does nothing if the map already has families.
+create function public.seed_air_families(p_map_id uuid) returns integer
+language plpgsql volatile security definer set search_path = ''
+as $$ begin
+  perform private.need_map(p_map_id);
+  if exists (select 1 from public.air_weapon_families where map_id = p_map_id) then return 0; end if;
+  insert into public.air_weapon_families (map_id, name, guidance, color, sort) values
+    (p_map_id, 'IR', 'ir', '#ff9f0a', 0), (p_map_id, 'ARH', 'radar', '#0a84ff', 1),
+    (p_map_id, 'HARM', 'harm', '#bf5af2', 2), (p_map_id, 'AGM', 'agm', '#30d158', 3);
+  return 4;
+end $$;
+
+-- A missile tier. Its research node in the tech tree is created and kept in step here: same name,
+-- research cost and release turn, and it requires the tier below in the same family.
+-- p: id, family_id, tier, name, guidance, accuracy, range_m, damage, ap, weight, slots, targets, research_cost, release_turn, deleted.
+create function public.save_air_weapon(p_map_id uuid, p jsonb) returns uuid
+language plpgsql volatile security definer set search_path = ''
+as $$
+declare
+  wid uuid := coalesce(nullif(p ->> 'id', '')::uuid, gen_random_uuid());
+  w public.air_weapons;
+  fam public.air_weapon_families;
+  prev uuid;
+  tid uuid;
+  tg text[] := coalesce(array(select jsonb_array_elements_text(case when jsonb_typeof(p -> 'targets') = 'array' then p -> 'targets' else '["air"]' end)), '{air}');
+begin
+  perform private.need_map(p_map_id);
+  select * into fam from public.air_weapon_families x where x.id = nullif(p ->> 'family_id', '')::uuid and x.map_id = p_map_id;
+  if not found then raise exception 'pick a weapon family' using errcode = '22023'; end if;
+  if exists (select 1 from public.air_weapons x where x.id = wid and x.map_id <> p_map_id) then
+    raise exception 'weapon is on another map' using errcode = '42501';
+  end if;
+  if exists (select 1 from unnest(tg) x where x not in ('air', 'ground', 'ship', 'radar')) or cardinality(tg) = 0 then
+    raise exception 'targets are air, ground, ship or radar' using errcode = '22023';
+  end if;
+  insert into public.air_weapons (id, map_id, family_id, tier, name, guidance, accuracy, range_m, damage, ap, weight, slots, targets, deleted_at)
+  values (wid, p_map_id, fam.id, coalesce((p ->> 'tier')::integer, 1), trim(p ->> 'name'), coalesce(p ->> 'guidance', fam.guidance),
+          coalesce((p ->> 'accuracy')::float8, 70), coalesce((p ->> 'range_m')::float8, 50000), coalesce((p ->> 'damage')::float8, 100),
+          coalesce((p ->> 'ap')::float8, 10), coalesce((p ->> 'weight')::float8, 150), coalesce((p ->> 'slots')::integer, 1), tg,
+          case when coalesce((p ->> 'deleted')::boolean, false) then now() end)
+  on conflict (id) do update set family_id = excluded.family_id, tier = excluded.tier, name = excluded.name, guidance = excluded.guidance,
+    accuracy = excluded.accuracy, range_m = excluded.range_m, damage = excluded.damage, ap = excluded.ap, weight = excluded.weight,
+    slots = excluded.slots, targets = excluded.targets,
+    deleted_at = case when p ? 'deleted' then excluded.deleted_at else public.air_weapons.deleted_at end
+  returning * into w;
+
+  if w.deleted_at is not null then
+    -- A deleted missile leaves the tech tree (and loadouts); restoring it puts a fresh node back.
+    if w.tech_item_id is not null then
+      perform public.delete_tech_item(w.tech_item_id);
+      update public.air_weapons set tech_item_id = null where id = w.id;
+    end if;
+    update public.squadrons q set loadout = coalesce((select jsonb_agg(l) from jsonb_array_elements(q.loadout) l where l ->> 'weapon' <> w.id::text), '[]')
+     where q.map_id = p_map_id and q.loadout @> jsonb_build_array(jsonb_build_object('weapon', w.id::text));
+    return w.id;
+  end if;
+
+  select x.tech_item_id into prev from public.air_weapons x
+   where x.family_id = w.family_id and x.tier = w.tier - 1 and x.deleted_at is null and x.tech_item_id is not null order by x.created_at limit 1;
+  tid := coalesce(w.tech_item_id, gen_random_uuid());
+  insert into public.tech_items (id, map_id, name, description, tier, sort, research_cost, spawn_cost, prereqs, buyable, category,
+                                 release_turn, pos_x, pos_y)
+  values (tid, p_map_id, w.name, fam.name || ' missile, tier ' || w.tier, w.tier, 0, coalesce((p ->> 'research_cost')::integer, case when w.tier = 1 then 0 else 10 end),
+          0, case when prev is null then '{}' else array[prev] end, false, 'weapon', (p ->> 'release_turn')::integer,
+          1400 + fam.sort * 260, (w.tier - 1) * 200)
+  on conflict (id) do update set name = excluded.name, description = excluded.description, tier = excluded.tier,
+    research_cost = case when p ? 'research_cost' then excluded.research_cost else public.tech_items.research_cost end,
+    release_turn = case when p ? 'release_turn' then excluded.release_turn else public.tech_items.release_turn end,
+    -- Keep any extra prerequisites the owner added; the family link always points at the tier below.
+    prereqs = (select coalesce(array_agg(x), '{}') from unnest(public.tech_items.prereqs) x
+               where x not in (select y.tech_item_id from public.air_weapons y where y.family_id = w.family_id and y.tech_item_id is not null))
+              || case when prev is null then '{}'::uuid[] else array[prev] end;
+  update public.air_weapons set tech_item_id = tid where id = w.id and tech_item_id is distinct from tid;
+  -- The tier above now requires this one.
+  update public.tech_items ti set prereqs = (select coalesce(array_agg(x), '{}') from unnest(ti.prereqs) x
+                                              where x not in (select y.tech_item_id from public.air_weapons y where y.family_id = w.family_id and y.tech_item_id is not null)) || tid
+   from public.air_weapons up where up.family_id = w.family_id and up.tier = w.tier + 1 and up.deleted_at is null and ti.id = up.tech_item_id;
+  return w.id;
+end $$;
+
+-- p: id, name, owner_player_id, airframe_id, base_feature_id, aircraft, max_aircraft, damage, loadout. The owner's loadouts skip research checks.
+create function public.save_squadron(p_map_id uuid, p jsonb) returns uuid
+language plpgsql volatile security definer set search_path = ''
+as $$
+declare
+  qid uuid := coalesce(nullif(p ->> 'id', '')::uuid, gen_random_uuid());
+  a public.airframes;
+  base public.features;
+  owner uuid := nullif(p ->> 'owner_player_id', '')::uuid;
+begin
+  perform private.need_map(p_map_id);
+  if exists (select 1 from public.squadrons x where x.id = qid and x.map_id <> p_map_id) then
+    raise exception 'squadron is on another map' using errcode = '42501';
+  end if;
+  select * into a from public.airframes x where x.id = nullif(p ->> 'airframe_id', '')::uuid and x.map_id = p_map_id;
+  if not found then raise exception 'pick an airframe' using errcode = '22023'; end if;
+  if owner is not null and not exists (select 1 from public.players x where x.id = owner and x.map_id = p_map_id) then
+    raise exception 'player is not on this map' using errcode = '22023';
+  end if;
+  if nullif(p ->> 'base_feature_id', '') is not null then
+    select * into base from public.features x where x.id = (p ->> 'base_feature_id')::uuid and x.map_id = p_map_id;
+    if not found or private.base_capacity(base) <= 0 then
+      raise exception 'that unit is not an airbase (give its unit template an air capacity)' using errcode = '22023';
+    end if;
+  end if;
+  perform private.check_loadout(null, a, coalesce(p -> 'loadout', '[]'), null);
+  insert into public.squadrons (id, map_id, owner_player_id, name, airframe_id, base_feature_id, aircraft, max_aircraft, damage, loadout)
+  values (qid, p_map_id, owner, trim(p ->> 'name'), a.id, base.id, greatest(0, coalesce((p ->> 'aircraft')::integer, a.squadron_size)),
+          greatest(1, coalesce((p ->> 'max_aircraft')::integer, a.squadron_size)), greatest(0, coalesce((p ->> 'damage')::float8, 0)),
+          coalesce(p -> 'loadout', '[]'))
+  on conflict (id) do update set name = excluded.name, owner_player_id = excluded.owner_player_id, airframe_id = excluded.airframe_id,
+    base_feature_id = excluded.base_feature_id, aircraft = least(excluded.aircraft, excluded.max_aircraft), max_aircraft = excluded.max_aircraft,
+    damage = excluded.damage, loadout = excluded.loadout;
+  return qid;
+end $$;
+
+create function public.delete_squadron(p_id uuid) returns void
+language plpgsql volatile security definer set search_path = ''
+as $$ begin
+  perform private.need_admin();
+  delete from public.squadrons where id = p_id;
+end $$;
+
+
+-- The air part of one player's combat report: their squadrons' losses, enemy aircraft they downed,
+-- their strikes, and what their recon saw (exact, as of after this turn's fighting).
+create function private.air_report(t public.turns, pl public.players, res jsonb, s jsonb) returns jsonb
+language sql stable set search_path = ''
+as $$
+  select jsonb_build_object(
+    'squadrons', coalesce((select jsonb_agg(jsonb_build_object('name', x ->> 'name', 'mission', x ->> 'mission', 'before', x -> 'before', 'after', x -> 'after', 'lost', x -> 'lost'))
+                           from jsonb_array_elements(coalesce(res -> 'air' -> 'squadrons', '[]')) x
+                           where x ->> 'owner' = pl.id::text and (x ->> 'mission' is not null or (x ->> 'lost')::integer > 0)), '[]'::jsonb),
+    'downed', coalesce((select sum((k ->> 'count')::integer) from jsonb_array_elements(coalesce(res -> 'air' -> 'kills', '[]')) k where k ->> 'owner' = pl.id::text), 0),
+    'strikes', coalesce((select jsonb_agg(jsonb_build_object('squadron', x ->> 'squadron_name', 'target', x ->> 'target_name', 'hits', x -> 'hits',
+                           'shots', x -> 'shots', 'damage', x -> 'damage', 'destroyed', x -> 'destroyed', 'aborted', x ->> 'aborted'))
+                         from jsonb_array_elements(coalesce(res -> 'air' -> 'strikes', '[]')) x where x ->> 'owner' = pl.id::text), '[]'::jsonb),
+    'recon', coalesce((select jsonb_agg(jsonb_build_object('squadron', r ->> 'squadron_name', 'center', r -> 'center', 'radius_m', r -> 'radius_m',
+                         'units', (select coalesce(jsonb_agg(jsonb_build_object('name', coalesce(nullif(f.props ->> 'name', ''), tp.name), 'type', tp.name,
+                                      'strength', round(coalesce(st.strength, tp.max_strength)), 'max', tp.max_strength)), '[]'::jsonb)
+                                   from public.features f
+                                   join public.unit_templates tp on tp.id = private.template_for(f.map_id, f.kind, f.asset_id, f.props)
+                                   left join public.unit_state st on st.feature_id = f.id
+                                   where f.map_id = t.map_id and f.owner_player_id is distinct from pl.id
+                                     and private.dist_m(private.anchor(f.geometry), array[(r -> 'center' ->> 0)::float8, (r -> 'center' ->> 1)::float8]) <= (r ->> 'radius_m')::float8),
+                         'squadrons', (select coalesce(jsonb_agg(jsonb_build_object('name', q.name, 'airframe', a.name, 'aircraft', q.aircraft, 'max', q.max_aircraft)), '[]'::jsonb)
+                                       from public.squadrons q join public.airframes a on a.id = q.airframe_id join public.features b on b.id = q.base_feature_id
+                                       where q.map_id = t.map_id and q.owner_player_id is distinct from pl.id
+                                         and private.dist_m(private.anchor(b.geometry), array[(r -> 'center' ->> 0)::float8, (r -> 'center' ->> 1)::float8]) <= (r ->> 'radius_m')::float8)))
+                       from jsonb_array_elements(coalesce(res -> 'air' -> 'reveals', '[]')) r where r ->> 'owner' = pl.id::text), '[]'::jsonb));
+$$;
+
+-- Air state for one player: own squadrons and bases in full; missiles they can see in the tree (fit data
+-- only: range, weight, slots, guidance, targets; never accuracy or damage); enemy squadrons at bases within
+-- intel range as bands; and what last turn's recon revealed, exact, until the next push.
+create function private.player_air(p public.players) returns jsonb
+language sql stable set search_path = ''
+as $$
+  with s as (select private.combat_settings_for(p.map_id, private.current_turn_number(p.map_id)) as v),
+  n as (select private.current_turn_number(p.map_id) as v),
+  mine as (select private.anchor(f.geometry) as pos from public.features f where f.map_id = p.map_id and f.owner_player_id = p.id),
+  rev as (select r.* from public.air_reveals r where r.player_id = p.id
+            and r.turn_number = (select max(x.number) from public.turns x where x.map_id = p.map_id and x.status = 'pushed'))
+  select jsonb_build_object(
+    'squadrons', coalesce((select jsonb_agg(jsonb_build_object(
+        'id', q.id, 'name', q.name, 'aircraft', q.aircraft, 'max', q.max_aircraft, 'damage', q.damage, 'loadout', q.loadout,
+        'base', q.base_feature_id, 'base_name', (select coalesce(nullif(b.props ->> 'name', ''), 'Airbase') from public.features b where b.id = q.base_feature_id),
+        'base_pos', (select to_jsonb(private.anchor(b.geometry)) from public.features b where b.id = q.base_feature_id),
+        'radius_m', private.squadron_radius(q, (select v from s)), 'weight', private.loadout_weight(q.loadout),
+        'airframe', jsonb_build_object('id', a.id, 'name', a.name, 'hp', a.hp, 'hardpoints', a.hardpoints, 'max_payload', a.max_payload,
+                      'radius_m', a.radius_m, 'radar_m', a.radar_m, 'cost_per_aircraft', a.cost_per_aircraft, 'sidc', a.sidc, 'asset_id', a.asset_id))
+        order by q.created_at)
+      from public.squadrons q join public.airframes a on a.id = q.airframe_id where q.map_id = p.map_id and q.owner_player_id = p.id), '[]'::jsonb),
+    'weapons', coalesce((select jsonb_agg(jsonb_build_object('id', w.id, 'name', w.name, 'family', fam.name, 'family_color', fam.color, 'tier', w.tier,
+                           'guidance', w.guidance, 'range_m', w.range_m, 'weight', w.weight, 'slots', w.slots, 'targets', to_jsonb(w.targets),
+                           'tech_item', w.tech_item_id, 'unlocked', ti.id is null or private.unlocked(p, ti, (select v from n)))
+                           order by fam.sort, w.tier)
+      from public.air_weapons w join public.air_weapon_families fam on fam.id = w.family_id and fam.deleted_at is null
+      left join public.tech_items ti on ti.id = w.tech_item_id
+      where w.map_id = p.map_id and w.deleted_at is null and (ti.id is null or private.released(ti, (select v from n)))), '[]'::jsonb),
+    'bases', coalesce((select jsonb_agg(jsonb_build_object('id', f.id, 'name', coalesce(nullif(f.props ->> 'name', ''), 'Airbase'),
+                         'capacity', private.base_capacity(f), 'used', (select count(*) from public.squadrons q where q.base_feature_id = f.id),
+                         'pos', to_jsonb(private.anchor(f.geometry))))
+      from public.features f where f.map_id = p.map_id and f.owner_player_id = p.id and f.kind in ('symbol', 'asset') and private.base_capacity(f) > 0), '[]'::jsonb),
+    'radius_penalty', (select (v ->> 'radius_penalty')::float8 from s),
+    'patrol_radius_km', (select (v ->> 'patrol_radius_km')::float8 from s),
+    'patrol_radius_max_km', (select (v ->> 'patrol_radius_max_km')::float8 from s),
+    'recon_radius_km', (select (v ->> 'recon_radius_km')::float8 from s),
+    'enemy_bases', coalesce((select jsonb_agg(jsonb_build_object('base', b.id, 'squadrons', (
+        select jsonb_agg(private.band(q.aircraft::float8 / q.max_aircraft, (select v from s))) from public.squadrons q where q.base_feature_id = b.id)))
+      from public.features b
+      where b.map_id = p.map_id and b.owner_player_id is distinct from p.id
+        and exists (select 1 from public.squadrons q where q.base_feature_id = b.id)
+        and exists (select 1 from public.layers l where l.id = b.layer_id and l.visible and (p.visible_layers is null or l.id = any (p.visible_layers)))
+        and exists (select 1 from mine m where private.dist_m(m.pos, private.anchor(b.geometry)) <= (select (v ->> 'intel_km')::float8 * 1000 from s))), '[]'::jsonb),
+    'reveals', coalesce((select jsonb_agg(jsonb_build_object('center', to_jsonb(r.center), 'radius_m', r.radius_m)) from rev r), '[]'::jsonb),
+    -- Exact stats of other units inside last turn's recon circles.
+    'revealed', coalesce((select jsonb_object_agg(f.id, jsonb_build_object('type', tp.name, 'strength', round(coalesce(st.strength, tp.max_strength)), 'max', tp.max_strength))
+      from public.features f
+      join public.unit_templates tp on tp.id = private.template_for(f.map_id, f.kind, f.asset_id, f.props)
+      left join public.unit_state st on st.feature_id = f.id
+      where f.map_id = p.map_id and f.owner_player_id is distinct from p.id
+        and exists (select 1 from rev r where private.dist_m(private.anchor(f.geometry), r.center) <= r.radius_m)), '{}'::jsonb),
+    'revealed_squadrons', coalesce((select jsonb_agg(jsonb_build_object('base', q.base_feature_id, 'name', q.name, 'airframe', a.name, 'aircraft', q.aircraft, 'max', q.max_aircraft))
+      from public.squadrons q join public.airframes a on a.id = q.airframe_id join public.features b on b.id = q.base_feature_id
+      where q.map_id = p.map_id and q.owner_player_id is distinct from p.id
+        and exists (select 1 from rev r where private.dist_m(private.anchor(b.geometry), r.center) <= r.radius_m)), '[]'::jsonb),
+    -- Squadron-buying items this player can see (the tree decides price and research).
+    'squadron_items', coalesce((select jsonb_agg(jsonb_build_object('id', ti.id, 'name', ti.name, 'spawn_cost', ti.spawn_cost, 'airframe', a.name,
+                                 'size', a.squadron_size, 'unlocked', private.unlocked(p, ti, (select v from n))))
+      from public.tech_items ti join public.airframes a on a.id = ti.airframe_id
+      where ti.map_id = p.map_id and ti.category = 'squadron' and ti.buyable and private.released(ti, (select v from n))), '[]'::jsonb));
+$$;
+
+-- ---------------------------------------------------------------------------
 -- 8. History, rollback, backup
 -- ---------------------------------------------------------------------------
 
@@ -2844,6 +3542,10 @@ as $$ begin
     'combat_settings', coalesce((select jsonb_agg(to_jsonb(x)) from public.combat_settings x where x.map_id = p_map_id), '[]'::jsonb),
     'combat_reports', coalesce((select jsonb_agg(to_jsonb(x)) from public.combat_reports x where x.map_id = p_map_id), '[]'::jsonb),
     'terrain', private.terrain_json(p_map_id),
+    'airframes', coalesce((select jsonb_agg(to_jsonb(x)) from public.airframes x where x.map_id = p_map_id), '[]'::jsonb),
+    'air_weapon_families', coalesce((select jsonb_agg(to_jsonb(x)) from public.air_weapon_families x where x.map_id = p_map_id), '[]'::jsonb),
+    'air_weapons', coalesce((select jsonb_agg(to_jsonb(x)) from public.air_weapons x where x.map_id = p_map_id), '[]'::jsonb),
+    'squadrons', coalesce((select jsonb_agg(to_jsonb(x)) from public.squadrons x where x.map_id = p_map_id), '[]'::jsonb),
     'terrain_meta', (select jsonb_build_object('area', extensions.st_asgeojson(m.area)::jsonb, 'source', m.source, 'options', m.options)
                      from public.terrain_meta m where m.map_id = p_map_id));
 end $$;
@@ -2905,6 +3607,17 @@ begin
   insert into public.combat_settings select * from jsonb_populate_recordset(null::public.combat_settings, coalesce(p -> 'combat_settings', '[]'));
   insert into public.combat_reports select * from jsonb_populate_recordset(null::public.combat_reports, coalesce(p -> 'combat_reports', '[]'))
     where player_id in (select id from public.players where map_id = mid);
+  -- Backups from before schema 10 have no air data.
+  insert into public.airframes
+    select * from jsonb_populate_recordset(null::public.airframes, (
+      select coalesce(jsonb_agg(case when exists (select 1 from public.assets a where a.id::text = e ->> 'asset_id') then e else e - 'asset_id' end), '[]'::jsonb)
+      from jsonb_array_elements(coalesce(p -> 'airframes', '[]')) e));
+  insert into public.air_weapon_families select * from jsonb_populate_recordset(null::public.air_weapon_families, coalesce(p -> 'air_weapon_families', '[]'));
+  insert into public.air_weapons select * from jsonb_populate_recordset(null::public.air_weapons, coalesce(p -> 'air_weapons', '[]'));
+  insert into public.squadrons
+    select * from jsonb_populate_recordset(null::public.squadrons, (
+      select coalesce(jsonb_agg(case when exists (select 1 from public.features f where f.id::text = e ->> 'base_feature_id') then e else e - 'base_feature_id' end), '[]'::jsonb)
+      from jsonb_array_elements(coalesce(p -> 'squadrons', '[]')) e));
   insert into public.terrain_zones (map_id, type, geom, area_km2)
     select mid, f -> 'properties' ->> 'type', extensions.st_multi(extensions.st_setsrid(extensions.st_geomfromgeojson((f -> 'geometry')::text), 4326)),
            coalesce((f -> 'properties' ->> 'area_km2')::float8, 0)
@@ -2919,7 +3632,9 @@ begin
   if exists (select 1 from jsonb_array_elements(p -> 'layers' || p -> 'players' || p -> 'features' || p -> 'turns' || p -> 'snapshots' || p -> 'share_links'
                                                 || coalesce(p -> 'tech_items', '[]') || coalesce(p -> 'spawn_zones', '[]')
                                                 || coalesce(p -> 'weapon_profiles', '[]') || coalesce(p -> 'unit_templates', '[]')
-                                                || coalesce(p -> 'engagements', '[]') || coalesce(p -> 'combat_settings', '[]')) e
+                                                || coalesce(p -> 'engagements', '[]') || coalesce(p -> 'combat_settings', '[]')
+                                                || coalesce(p -> 'airframes', '[]') || coalesce(p -> 'air_weapon_families', '[]')
+                                                || coalesce(p -> 'air_weapons', '[]') || coalesce(p -> 'squadrons', '[]')) e
                  where e ->> 'map_id' is distinct from mid::text)
      or exists (select 1 from jsonb_array_elements(p -> 'rules' || p -> 'allocations' || p -> 'drafts') e
                  where (e ->> 'turn_id')::uuid not in (select id from public.turns where map_id = mid)) then
@@ -3036,6 +3751,7 @@ begin
                               where z.map_id = p.map_id
                                 and (z.player_id = p.id or (z.team is not null and z.team = p.team) or (z.player_id is null and z.team is null))), '[]'::jsonb),
     'combat', private.player_combat(p),
+    'air', private.player_air(p),
     -- Own units that are spawn points, where they stand now (they may be on a layer this player cannot see).
     'spawn_points', coalesce((select jsonb_agg(jsonb_build_object('feature_id', f.id, 'center', to_jsonb(private.anchor(f.geometry)), 'radius_m', x.spawn_radius_m,
                                   'name', x.name, 'item_id', x.id))
@@ -3157,7 +3873,8 @@ alter table public.players add column if not exists pin_set boolean generated al
 revoke all on public.app_meta, public.maps, public.layers, public.features, public.assets, public.share_links, public.players,
   public.turns, public.turn_move_rules, public.allocations, public.drafts, public.snapshots, public.activity,
   public.tech_items, public.spawn_zones, public.weapon_profiles, public.unit_templates, public.unit_state, public.engagements,
-  public.combat_settings, public.combat_previews, public.combat_reports, public.terrain_zones, public.terrain_meta
+  public.combat_settings, public.combat_previews, public.combat_reports, public.terrain_zones, public.terrain_meta,
+  public.airframes, public.air_weapon_families, public.air_weapons, public.squadrons, public.air_reveals
   from public, anon, authenticated;
 grant usage on schema public to anon, authenticated;
 grant usage on schema private to authenticated;
@@ -3173,7 +3890,8 @@ declare t text;
 begin
   foreach t in array array['app_meta','maps','layers','features','assets','share_links','players','turns','turn_move_rules',
                            'allocations','drafts','snapshots','activity','tech_items','spawn_zones','weapon_profiles','unit_templates',
-                           'unit_state','engagements','combat_settings','combat_previews','combat_reports','terrain_zones','terrain_meta'] loop
+                           'unit_state','engagements','combat_settings','combat_previews','combat_reports','terrain_zones','terrain_meta',
+                           'airframes','air_weapon_families','air_weapons','squadrons','air_reveals'] loop
     execute format('alter table public.%I enable row level security', t);
     if t in ('maps','layers','features','assets','share_links','players','turns','turn_move_rules','allocations','drafts') then
       execute format('create policy %I on public.%I for all to authenticated using (private.is_admin()) with check (private.is_admin())', t || '_admin', t);
@@ -3201,7 +3919,8 @@ begin
         'get_economy','save_tech_item','delete_tech_item','save_spawn_zone','delete_spawn_zone','set_player_points','set_player_tech',
         'move_tech_items',
         'get_combat_admin','save_weapon','save_unit_template','save_combat_settings','set_unit_state','end_engagement',
-        'get_combat_inputs','save_combat_preview','get_combat_preview','replace_terrain','get_terrain','get_player_terrain','get_shared_terrain']) then
+        'get_combat_inputs','save_combat_preview','get_combat_preview','replace_terrain','get_terrain','get_player_terrain','get_shared_terrain',
+        'get_air_admin','save_airframe','save_air_family','save_air_weapon','save_squadron','delete_squadron','seed_air_families','set_loadout']) then
       execute 'revoke all on function ' || r.sig || ' from public, anon';
       execute 'grant execute on function ' || r.sig || ' to authenticated';
       if r.proname in ('app_status', 'keepalive', 'get_shared_map', 'get_shared_terrain') then
@@ -3242,7 +3961,7 @@ exception when others then
   raise notice 'pg_net is not available here; Discord announcements are disabled';
 end $$;
 
-insert into public.app_meta (key, value) values ('schema_version', '9')
+insert into public.app_meta (key, value) values ('schema_version', '10')
 on conflict (key) do update set value = excluded.value, updated_at = now();
 
 commit;

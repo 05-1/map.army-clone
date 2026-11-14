@@ -12,6 +12,8 @@ import { publicAssetUrl } from '../lib/supabase';
 import type { Asset, CreatePayload, Feature, Pos } from '../lib/types';
 import { canPlace, sourcesFor, usable, whereText } from '../lib/tech';
 import { effective, pointsLeft, remaining, usePlay, type PTool } from './store';
+import { distanceM } from '../lib/geo';
+import { flyable, missionOf, missionPoint } from './AirPanel';
 
 const S = () => usePlay.getState();
 const OVERLAY = 'play-overlay';
@@ -34,6 +36,11 @@ const overlayLayers = (color: string) => [
   { id: 'po-range-sel', type: 'line', source: OVERLAY, filter: ['==', ['get', 'o'], 'range-sel'], paint: { 'line-color': '#35c7f0', 'line-width': 2, 'line-dasharray': [3, 2] } },
   { id: 'po-eng', type: 'line', source: OVERLAY, filter: ['==', ['get', 'o'], 'eng'], paint: { 'line-color': '#ff9f0a', 'line-width': 3, 'line-opacity': 0.7 } },
   { id: 'po-atk', type: 'line', source: OVERLAY, filter: ['==', ['get', 'o'], 'atk'], paint: { 'line-color': '#ff453a', 'line-width': 2, 'line-dasharray': [2, 1.5] } },
+  { id: 'po-air-ring', type: 'line', source: OVERLAY, filter: ['==', ['get', 'o'], 'air-ring'], paint: { 'line-color': '#35c7f0', 'line-width': 1.5, 'line-dasharray': [4, 3], 'line-opacity': 0.8 } },
+  { id: 'po-air-area', type: 'fill', source: OVERLAY, filter: ['==', ['get', 'o'], 'air-area'], paint: { 'fill-color': '#35c7f0', 'fill-opacity': 0.08 } },
+  { id: 'po-air-edge', type: 'line', source: OVERLAY, filter: ['==', ['get', 'o'], 'air-area'], paint: { 'line-color': '#35c7f0', 'line-width': 1.5 } },
+  { id: 'po-air-seen', type: 'line', source: OVERLAY, filter: ['==', ['get', 'o'], 'air-seen'], paint: { 'line-color': '#ffd60a', 'line-width': 1.5, 'line-dasharray': [1, 2] } },
+  { id: 'po-air', type: 'line', source: OVERLAY, filter: ['==', ['get', 'o'], 'air'], layout: { 'line-cap': 'round' }, paint: { 'line-color': '#35c7f0', 'line-width': 2, 'line-dasharray': [0.5, 2] } },
   { id: 'po-vert', type: 'circle', source: OVERLAY, filter: ['==', ['get', 'o'], 'v'],
     paint: { 'circle-radius': 4, 'circle-color': '#ffffff', 'circle-stroke-color': '#0d1014', 'circle-stroke-width': 1.5 } },
 ] as unknown as LayerSpecification[];
@@ -71,8 +78,8 @@ export class PlayController {
         this.cursor = null;
         map.getCanvas().style.cursor = s.tool === 'select' ? '' : 'crosshair';
       }
-      if (s.targeting !== p.targeting) map.getCanvas().style.cursor = s.targeting ? 'crosshair' : '';
-      if (s.state !== p.state || s.draft !== p.draft || s.sel !== p.sel || s.tool !== p.tool || s.allocId !== p.allocId || s.buyId !== p.buyId || s.viewing !== p.viewing) this.draw();
+      if (s.targeting !== p.targeting || s.airPick !== p.airPick) map.getCanvas().style.cursor = s.targeting || s.airPick ? 'crosshair' : '';
+      if (s.airSel !== p.airSel || s.airPick !== p.airPick || s.state !== p.state || s.draft !== p.draft || s.sel !== p.sel || s.tool !== p.tool || s.allocId !== p.allocId || s.buyId !== p.buyId || s.viewing !== p.viewing) this.draw();
     });
     this.draw();
   }
@@ -143,6 +150,22 @@ export class PlayController {
           if (a && b) add({ type: 'LineString', coordinates: [a, b] }, 'eng');
         }
       }
+    }
+    if (!viewing && state.air) {
+      // Air: the open squadron's reach, every drafted mission's route, and last turn's recon circles.
+      const { airSel, airPick } = S();
+      const q = state.air.squadrons.find((x) => x.id === (airPick?.squadron ?? airSel));
+      if (q?.base_pos) add(circlePoly(q.base_pos, q.radius_m), 'air-ring');
+      for (const c of draft) {
+        if (c.op !== 'mission') continue;
+        const from = state.air.squadrons.find((x) => x.id === c.feature_id)?.base_pos;
+        const to = missionPoint(c.payload, draft);
+        if (!from || !to) continue;
+        add({ type: 'LineString', coordinates: [from, to] }, 'air');
+        if (c.payload.type === 'patrol') add(circlePoly(to, c.payload.radius_m ?? state.air.patrol_radius_km * 1000), 'air-area');
+        if (c.payload.type === 'recon') add(circlePoly(to, state.air.recon_radius_km * 1000), 'air-area');
+      }
+      for (const r of state.air.reveals) add(circlePoly(r.center, r.radius_m), 'air-seen');
     }
     if (e) add(e.f.geometry, e.f.geometry.type === 'Point' ? 'selpt' : 'sel');
     if (this.pts) {
@@ -263,6 +286,34 @@ export class PlayController {
     usePlay.setState({ sel: tg.fid });
   }
 
+  /** Set a squadron's mission target from a click: an enemy ground unit for a strike, a point otherwise. */
+  private pickMission(pk: { squadron: string; type: 'strike' | 'patrol' | 'recon' }, id: string | null, at: Pos) {
+    const s = S();
+    const air = s.state?.air;
+    const q = air?.squadrons.find((x) => x.id === pk.squadron);
+    usePlay.setState({ airPick: null });
+    if (!air || !q) return;
+    if (!q.base_pos) return s.say(`${q.name} has no base.`);
+    if (flyable(q) < 1) return s.say(`${q.name} has no aircraft that can fly.`);
+    let to = at;
+    let target_unit: string | undefined;
+    if (pk.type === 'strike') {
+      const c = s.state!.combat;
+      if (!id || !s.state!.features.some((f) => f.id === id)) return s.say('No unit there. Choose Strike again and click an enemy unit.');
+      if (s.state!.mine.includes(id) || c?.own[id]) return s.say('That is one of your own units.');
+      if (c?.seen[id]?.ground === false) return s.say('Only ground units can be struck for now.');
+      const f = s.state!.features.find((x) => x.id === id)!;
+      to = anchorOf(f.geometry);
+      target_unit = id;
+    }
+    const d = distanceM(q.base_pos, to);
+    if (d > q.radius_m) return s.say(`Out of reach: ${Math.round(d / 1000)} km from ${q.base_name}, ${q.name} reaches ${Math.round(q.radius_m / 1000)} km with this loadout. A lighter loadout flies further.`);
+    const prev = missionOf(s.draft, q.id);
+    const radius_m = pk.type === 'patrol' ? (prev?.payload.type === 'patrol' && prev.payload.radius_m) || air.patrol_radius_km * 1000 : undefined;
+    // Changing a strike leaves its escorts in place; they follow the strike.
+    s.put({ op: 'mission', feature_id: q.id, payload: { type: pk.type, ...(target_unit ? { target_unit } : { target: to }), ...(radius_m ? { radius_m } : {}) } });
+  }
+
   /** Buttons for touch screens, where there is no Enter key and double-tap is unreliable. */
   private onDrawCmd = (e: Event) => {
     const cmd = (e as CustomEvent<'finish' | 'undo' | 'cancel'>).detail;
@@ -340,6 +391,8 @@ export class PlayController {
     if (tool === 'measure') return; // the measuring tool takes the clicks
     const tg = S().targeting;
     if (tg) return this.pickTarget(tg, this.hit(e.point, 12));
+    const pk = S().airPick;
+    if (pk) return this.pickMission(pk, this.hit(e.point, 12), at);
     if (tool === 'select') return usePlay.setState({ sel: this.hit(e.point, 10) });
     if (!S().editable()) return void S().put({ op: 'delete', feature_id: '' }); // explains why not
     if (!DRAW.includes(tool)) return this.place(tool, at);
@@ -362,7 +415,8 @@ export class PlayController {
       if (!this.pts.length) this.pts = null;
       this.draw();
     } else if (e.key === 'Escape') {
-      if (this.pts) {
+      if (S().airPick || S().targeting) usePlay.setState({ airPick: null, targeting: null });
+      else if (this.pts) {
         this.pts = null;
         this.cursor = null;
         this.draw();

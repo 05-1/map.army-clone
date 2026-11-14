@@ -23,6 +23,7 @@ import { ReviewOverlay } from './reviewOverlay';
 import { ShareDialog } from './ShareDialog';
 import { TechDialog, type TechTab } from './TechDialog';
 import { CombatDialog, type CombatTab } from './CombatDialog';
+import { AirDialog, type AirTab } from './AirDialog';
 import { setTerrain } from '../lib/terrainLayer';
 import { TerrainLegend } from '../lib/TerrainLegend';
 import { TurnPanel } from './TurnPanel';
@@ -104,6 +105,11 @@ function Workspace({ backend, who, meta, maps, setMaps, onSignOut, onSwitch, onP
   const [admin, setAdmin] = useState<AdminTab | null>(null);
   const [teching, setTeching] = useState<TechTab | null>(null);
   const [fighting, setFighting] = useState<CombatTab | null>(null);
+  const [flying, setFlying] = useState<AirTab | null>(null);
+  const refreshAir = useCallback(async () => {
+    const [a, c] = await Promise.all([backend.getAirAdmin(meta.id), backend.getCombatAdmin(meta.id)]);
+    useEd.setState({ air: a, combat: c });
+  }, [backend, meta.id]);
   const showTerrain = useEd((s) => s.showTerrain);
   const combat = useEd((s) => s.combat);
   const [terrainEmpty, setTerrainEmpty] = useState(false);
@@ -263,6 +269,7 @@ function Workspace({ backend, who, meta, maps, setMaps, onSignOut, onSwitch, onP
 
         backend.listPlayers(meta.id).then((list) => !cancelled && useEd.setState({ players: list }), () => {});
         backend.getCombatAdmin(meta.id).then((c) => !cancelled && useEd.setState({ combat: c }), () => {});
+        backend.getAirAdmin(meta.id).then((a) => !cancelled && useEd.setState({ air: a }), () => {});
         const poke = () => void refreshTurn().catch(() => {});
         poke();
         disposers.push(backend.watchDrafts(meta, poke));
@@ -340,6 +347,7 @@ function Workspace({ backend, who, meta, maps, setMaps, onSignOut, onSwitch, onP
         <button type="button" className="btn" onClick={() => setManagingPlayers(true)}>Players</button>
         <button type="button" className="btn" title="Tech tree, player points and spawn zones" onClick={() => (useEd.setState({ zoneDraw: false }), setTeching('tree'))}>Tech</button>
         <button type="button" className="btn" title="Unit templates, weapons, combat settings, terrain, sandbox" onClick={() => setFighting('units')}>Combat</button>
+        <button type="button" className="btn" title="Squadrons, airframes, missiles, countermeasures, air settings, air sandbox" onClick={() => setFlying('squadrons')}>Air</button>
         <button
           type="button"
           className={`btn${turnOpen ? ' on' : ''}`}
@@ -408,6 +416,7 @@ function Workspace({ backend, who, meta, maps, setMaps, onSignOut, onSwitch, onP
           prepare={() => st().select([])} onClose={() => setExporting(false)}
         />
       )}
+      {flying && <AirDialog backend={backend} map={meta} tab={flying} refresh={refreshAir} onClose={() => (setFlying(null), void refreshAir().catch(() => {}))} />}
       {fighting && (
         <CombatDialog backend={backend} map={meta} tab={fighting} getMap={() => map} refresh={refreshCombat}
           onTerrain={() => setTerrainRev((n) => n + 1)} onClose={() => (setFighting(null), void refreshCombat().catch(() => {}))} />

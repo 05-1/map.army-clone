@@ -32,6 +32,12 @@ const localInput = (iso: string | null) => {
 };
 const nameOf = (f: Feature | undefined) => f?.props.name?.split('\n')[0] || (f ? f.kind : 'removed object');
 
+/** SP per replacement aircraft of a squadron, from the air admin data. */
+const aircraftCost = (air: import('../lib/types').AirAdmin | null) => (sq: string) => {
+  const q = air?.squadrons.find((x) => x.id === sq);
+  return air?.airframes.find((a) => a.id === q?.airframe_id)?.cost_per_aircraft ?? 0;
+};
+
 function Chip({ p }: { p?: Player }) {
   return <i className="chip" style={{ background: p?.color ?? '#8794a4' }} aria-hidden />;
 }
@@ -331,7 +337,7 @@ function Drafts({ backend, turn, act }: { backend: Backend; turn: Turn; act: Act
   };
   const st = useEd.getState;
   const costLine = (d: Draft) => {
-    const c = draftCost(d.owner_changes ?? d.changes, bundle.economy.items, d.rejected);
+    const c = draftCost(d.owner_changes ?? d.changes, bundle.economy.items, d.rejected, aircraftCost(useEd.getState().air));
     return c.spawn || c.research ? ` · spends ${[c.spawn && `${fmtPts(c.spawn)} spawn`, c.research && `${fmtPts(c.research)} research`].filter(Boolean).join(', ')}` : '';
   };
 
@@ -383,7 +389,9 @@ function DraftDetail(p: { backend: Backend; turn: Turn; player: Player; draft?: 
   const economy = useEd((s) => s.bundle!.economy);
   const changes = draft ? draft.owner_changes ?? draft.changes : [];
   const bal = economy.players.find((e) => e.id === player.id);
-  const cost = draftCost(changes, economy.items, draft?.rejected ?? []);
+  const air = useEd((s) => s.air);
+  const cost = draftCost(changes, economy.items, draft?.rejected ?? [], aircraftCost(air));
+  const sqName = (id: string) => air?.squadrons.find((q) => q.id === id)?.name ?? 'squadron';
   const rejected = new Set(draft?.rejected ?? []);
   const review = (patch: Parameters<Backend['reviewDraft']>[2]) => act(() => backend.reviewDraft(turn.id, player.id, patch));
   const toggle = (id: string) => review({ rejected: toggleRejected(changes, [...rejected], id, economy.items, bal?.tech_unlocked ?? []) });
@@ -401,7 +409,7 @@ function DraftDetail(p: { backend: Backend; turn: Turn; player: Player; draft?: 
                 <label className="row">
                   <input type="checkbox" checked={!rejected.has(c.feature_id)} onChange={() => void toggle(c.feature_id)} aria-label="Accept this change" />
                   <span>
-                    {describeChange(c, live, economy.items)}
+                    {describeChange(c, live, economy.items, sqName)}
                     {alloc && <small> · from {alloc.team ? `team ${alloc.team} pool` : 'own allocation'}</small>}
                     {c.op === 'update' && c.payload.order && <small> · “{c.payload.order}”</small>}
                   </span>

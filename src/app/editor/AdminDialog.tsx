@@ -7,6 +7,9 @@ import { turnLabel } from '../lib/TurnSlider';
 import type { MapMeta } from '../lib/types';
 import type { Activity, AdminList, Backend, CampaignBackup, Diagnostics, MapPatch, Who } from './backend';
 import { useEd } from './store';
+
+/** A stable empty list for store selectors (a new [] each read would re-render forever). */
+const NONE: never[] = [];
 import { Field, IconButton } from './ui';
 
 export type AdminTab = 'maps' | 'history' | 'settings' | 'diagnostics';
@@ -149,7 +152,7 @@ function Maps({ backend, map, maps, setMaps, onSwitch, onPatchMap, onClose }: Pr
 }
 
 function History({ backend, map, maps, setMaps, onSwitch, settle, reload, onClose }: Props) {
-  const history = useEd((s) => s.bundle?.history ?? []);
+  const history = useEd((s) => s.bundle?.history ?? NONE);
   const { busy, run, status } = useRun();
   const file = useRef<HTMLInputElement>(null);
 

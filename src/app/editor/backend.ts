@@ -251,6 +251,15 @@ export class Backend {
   replaceTerrain = (mapId: string, p: { zones: unknown[]; area: unknown; source: string; options: unknown }) => this.rpc<import('../lib/types').TerrainStats>('replace_terrain', { p_map_id: mapId, p });
   getTerrain = (mapId: string) => this.rpc<GeoJSON.FeatureCollection & { stats: import('../lib/types').TerrainStats; area: unknown }>('get_terrain', { p_map_id: mapId });
 
+  // ---- air ----
+  getAirAdmin = (mapId: string) => this.rpc<import('../lib/types').AirAdmin>('get_air_admin', { p_map_id: mapId });
+  saveAirframe = (mapId: string, a: Partial<import('../lib/types').Airframe> & { deleted?: boolean }) => this.rpc<string>('save_airframe', { p_map_id: mapId, p: a });
+  saveAirFamily = (mapId: string, f: Partial<import('../lib/types').AirFamily> & { deleted?: boolean }) => this.rpc<string>('save_air_family', { p_map_id: mapId, p: f });
+  seedAirFamilies = (mapId: string) => this.rpc<number>('seed_air_families', { p_map_id: mapId });
+  saveAirWeapon = (mapId: string, w: Partial<import('../lib/types').AirWeapon> & { deleted?: boolean }) => this.rpc<string>('save_air_weapon', { p_map_id: mapId, p: w });
+  saveSquadron = (mapId: string, q: Partial<import('../lib/types').Squadron>) => this.rpc<string>('save_squadron', { p_map_id: mapId, p: q });
+  deleteSquadron = (id: string) => this.rpc<void>('delete_squadron', { p_id: id });
+
   // ---- history ----
   getSnapshot = (mapId: string, turn: number) => this.rpc<SnapshotPayload | null>('get_snapshot', { p_map_id: mapId, p_turn: turn });
   rollbackTo = (mapId: string, turn: number) => this.rpc<{ turn: number; rollback_of: number }>('rollback_to', { p_map_id: mapId, p_turn: turn });

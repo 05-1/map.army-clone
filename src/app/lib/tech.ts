@@ -105,14 +105,15 @@ export function techStatus(it: TechItem, items: readonly TechItem[], unlocked: r
 }
 
 /** Points a draft spends: spawn points on purchases, research points on research. Rejected changes are free. */
-export function draftCost(changes: readonly Change[], items: readonly TechItem[], rejected: readonly string[] = []): { spawn: number; research: number } {
+export function draftCost(changes: readonly Change[], items: readonly TechItem[], rejected: readonly string[] = [], aircraftCost: (squadron: string) => number = () => 0): { spawn: number; research: number } {
   const byId = new Map(items.map((x) => [x.id, x]));
   let spawn = 0;
   let research = 0;
   for (const c of changes) {
     if (rejected.includes(c.feature_id)) continue;
     if (c.op === 'research') research += byId.get(c.feature_id)?.research_cost ?? 0;
-    else if (c.op === 'create' && c.payload.purchase_id) spawn += byId.get(c.payload.purchase_id)?.spawn_cost ?? 0;
+    else if ((c.op === 'create' || c.op === 'buy_squadron') && c.payload.purchase_id) spawn += byId.get(c.payload.purchase_id)?.spawn_cost ?? 0;
+    else if (c.op === 'buy_aircraft') spawn += aircraftCost(c.payload.squadron) * c.payload.count;
   }
   return { spawn, research };
 }

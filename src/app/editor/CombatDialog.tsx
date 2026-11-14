@@ -103,7 +103,7 @@ function Split({ list, form }: { list: ReactNode; form: ReactNode }) {
 // Unit templates
 // ---------------------------------------------------------------------------
 
-const BLANK_T: UnitTemplate = { id: '', name: '', max_strength: 1000, armor: 10, category: 'ground', asset_id: null, sidc: null, weapon_ids: [], deleted_at: null };
+const BLANK_T: UnitTemplate = { id: '', name: '', max_strength: 1000, armor: 10, category: 'ground', asset_id: null, sidc: null, weapon_ids: [], deleted_at: null, air_capacity: 0, aps: 0 };
 
 function TemplatesTab({ backend, map, busy, run }: { backend: Backend; map: MapMeta; busy: boolean; run: Run }) {
   const { templates, weapons } = useEd((s) => s.combat!);
@@ -161,6 +161,10 @@ function TemplatesTab({ backend, map, busy, run }: { backend: Backend; map: MapM
             <Field label="Max strength"><input type="number" min={1} value={edit.max_strength} onChange={(e) => set({ max_strength: num(e.target.value, 1) })} /></Field>
             <Field label="Armor"><input type="number" min={0} value={edit.armor} onChange={(e) => set({ armor: num(e.target.value) })} /></Field>
           </div>
+          <div className="row2">
+            <Field label="Airbase: squadrons it can hold (0 = none)"><input type="number" min={0} max={100} value={edit.air_capacity ?? 0} onChange={(e) => set({ air_capacity: Math.round(num(e.target.value, 0, 100)) })} /></Field>
+            <Field label="Active protection vs AGMs (%)"><input type="number" min={0} max={100} value={edit.aps ?? 0} onChange={(e) => set({ aps: num(e.target.value, 0, 100) })} /></Field>
+          </div>
           <Field label="Category" wide>
             <select value={edit.category} onChange={(e) => set({ category: e.target.value as UnitTemplate['category'] })}>
               <option value="ground">Ground</option>
@@ -215,7 +219,7 @@ function TemplatesTab({ backend, map, busy, run }: { backend: Backend; map: MapM
 // Weapons
 // ---------------------------------------------------------------------------
 
-const BLANK_W: WeaponProfile = { id: '', name: '', attacks: 100, ap: 10, range_m: 3000, indirect: false, deleted_at: null };
+const BLANK_W: WeaponProfile = { id: '', name: '', attacks: 100, ap: 10, range_m: 3000, indirect: false, deleted_at: null, anti_air: false, guidance: 'none', accuracy: 60, air_damage: 50, air_shots: 2 };
 
 function WeaponsTab({ backend, map, busy, run }: { backend: Backend; map: MapMeta; busy: boolean; run: Run }) {
   const { weapons, templates } = useEd((s) => s.combat!);
@@ -266,6 +270,26 @@ function WeaponsTab({ backend, map, busy, run }: { backend: Backend; map: MapMet
             <input type="checkbox" checked={edit.indirect} onChange={(e) => set({ indirect: e.target.checked })} />
             Indirect fire: hits any target in range, once per turn, only if the firing unit stays put; starts no engagement and draws no return fire
           </label>
+          <label className="check">
+            <input type="checkbox" checked={!!edit.anti_air} onChange={(e) => set({ anti_air: e.target.checked, guidance: e.target.checked && edit.guidance === 'none' ? 'radar' : edit.guidance })} />
+            Anti-air: fires at enemy aircraft striking a target within its range
+          </label>
+          {edit.anti_air && (
+            <div className="setgrp">
+              <Field label="Guidance (decides which countermeasure works against it)" wide>
+                <select value={edit.guidance ?? 'radar'} onChange={(e) => set({ guidance: e.target.value as WeaponProfile['guidance'] })}>
+                  <option value="radar">Radar (vs ECM/chaff; halved when the player sets the radar dark; HARMs can hit it while emitting)</option>
+                  <option value="ir">IR (vs flares; unaffected by going dark)</option>
+                  <option value="gun">Gun (vs manoeuvrability)</option>
+                </select>
+              </Field>
+              <div className="row2">
+                <Field label="Accuracy (%)"><input type="number" min={0} max={100} value={edit.accuracy ?? 60} onChange={(e) => set({ accuracy: num(e.target.value, 0, 100) })} /></Field>
+                <Field label="Damage per hit (aircraft HP)"><input type="number" min={0} value={edit.air_damage ?? 50} onChange={(e) => set({ air_damage: num(e.target.value) })} /></Field>
+              </div>
+              <Field label="Shots per strike over its area" wide><input type="number" min={0} max={100} value={edit.air_shots ?? 2} onChange={(e) => set({ air_shots: Math.round(num(e.target.value, 0, 100)) })} /></Field>
+            </div>
+          )}
           <div className="row2 wrap">
             <button type="button" className="btn primary" disabled={busy || !edit.name.trim()} onClick={() => void save()}>Save</button>
             {edit.id && <button type="button" className="btn" disabled={busy} onClick={() => setEdit({ ...edit, id: '', name: `${edit.name} (copy)`, deleted_at: null })}>Clone</button>}

@@ -12,6 +12,9 @@ import { layout, TechTree, type FlowEdit } from '../lib/TechTree';
 import type { MapMeta, Placement, SpawnZone, TechItem, Zone } from '../lib/types';
 import type { Backend } from './backend';
 import { useEd } from './store';
+
+/** A stable empty list for store selectors (a new [] each read would re-render forever). */
+const NONE: never[] = [];
 import { Field, IconButton } from './ui';
 
 export type TechTab = 'tree' | 'points' | 'zones';
@@ -94,9 +97,17 @@ const body = (it: TechItem) => {
 };
 
 function TreeTab({ backend, map, busy, run }: { backend: Backend; map: MapMeta; busy: boolean; run: Run }) {
-  const items = useEd((s) => s.bundle?.economy.items ?? []);
+  const items = useEd((s) => s.bundle?.economy.items ?? NONE);
   const turnNo = useEd((s) => s.bundle?.turn?.number ?? null);
-  const templates = useEd((s) => s.combat?.templates ?? []);
+  const templates = useEd((s) => s.combat?.templates ?? NONE);
+  const air = useEd((s) => s.air);
+  const airframes = (air?.airframes ?? []).filter((a) => !a.deleted_at);
+  const families = air?.families ?? [];
+  const airWeapons = air?.weapons ?? [];
+  const [filter, setFilter] = useState('all');
+  const familyOf = (techId: string) => airWeapons.find((w) => w.tech_item_id === techId)?.family_id;
+  const shown = items.filter((it) => filter === 'all' || (filter === 'ground' ? it.category === 'unit' || it.category === 'building'
+    : filter === 'squadron' ? it.category === 'squadron' : filter === 'missiles' ? it.category === 'weapon' : familyOf(it.id) === filter));
   const assets = useEd((s) => s.assets);
   const symbolDraft = useEd((s) => s.symbolDraft);
   const [edit, setEdit] = useState<TechItem | null>(null);
@@ -175,20 +186,53 @@ function TreeTab({ backend, map, busy, run }: { backend: Backend; map: MapMeta; 
             onto another box to make that box require this one; ✕ on a selected box's arrow removes the link.
           </small>
         </div>
-        <TechTree items={items} icon={icon} selected={edit?.id} onPick={(it) => setEdit(it ? { ...it } : null)} edit={flow} />
+        <div className="row2 wrap">
+          <Field label="Show">
+            <select value={filter} onChange={(e) => setFilter(e.target.value)}>
+              <option value="all">Everything</option>
+              <option value="ground">Units and buildings</option>
+              <option value="squadron">Squadrons</option>
+              <option value="missiles">All missiles</option>
+              {families.filter((f) => !f.deleted_at).map((f) => <option key={f.id} value={f.id}>{f.name} missiles</option>)}
+            </select>
+          </Field>
+        </div>
+        <TechTree items={shown} icon={icon} selected={edit?.id} onPick={(it) => setEdit(it ? { ...it } : null)} edit={flow} />
         <p className="tip">
           Research cost 0 = available to every player from the start. Units on the map pay income to the player they are
           assigned to, at every push; tag units you placed yourself with "Tech type" in the properties panel.
         </p>
       </div>
-      {edit ? (
+      {edit?.category === 'weapon' ? (
+        <div className="form">
+          <h4>{edit.name}</h4>
+          <p className="tip">
+            A missile tier. Its name, research cost, release turn and place in its family are set in <strong>Air &gt; Missiles</strong>, and this node follows.
+            You can still move the box and link extra prerequisites here.
+          </p>
+          <p className="points"><span>Research <b>{edit.research_cost || 'free'}</b></span>{edit.release_turn != null && <span>from turn <b>{edit.release_turn}</b></span>}</p>
+          <button type="button" className="btn" onClick={() => setEdit(null)}>Close</button>
+        </div>
+      ) : edit ? (
         <div className="form">
           <h4>{edit.id ? `Edit ${edit.name || 'item'}` : 'New item'}</h4>
           <Field label="Name" wide><input autoFocus value={edit.name} maxLength={80} placeholder="e.g. Main battle tank" onChange={(e) => set({ name: e.target.value })} onFocus={(e) => /^New (item|building)$/.test(edit.name) && e.target.select()} /></Field>
           <div className="seg" role="group" aria-label="Kind">
             <button type="button" className={edit.category === 'unit' ? 'on' : ''} onClick={() => set({ category: 'unit', can_move: true })}>Unit</button>
             <button type="button" className={edit.category === 'building' ? 'on' : ''} onClick={() => set({ ...BUILDING, spawn_cost: edit.spawn_cost, research_cost: edit.research_cost, spawn_radius_m: edit.spawn_radius_m ?? 5000, spawn_from: [] })}>Production building</button>
+            <button type="button" className={edit.category === 'squadron' ? 'on' : ''} disabled={!airframes.length} title={airframes.length ? undefined : 'Make an airframe in the Air window first'}
+              onClick={() => set({ category: 'squadron', buyable: true, can_move: true, spawn_radius_m: null, spawn_from: [], airframe_id: edit.airframe_id ?? airframes[0]?.id ?? null })}>Squadron</button>
           </div>
+          {edit.category === 'squadron' && (
+            <>
+              <Field label="Airframe" wide>
+                <select value={edit.airframe_id ?? ''} onChange={(e) => set({ airframe_id: e.target.value })}>
+                  {airframes.map((a) => <option key={a.id} value={a.id}>{a.name} ({a.squadron_size} aircraft)</option>)}
+                </select>
+              </Field>
+              <p className="tip">Players buy it with the spawn cost below to raise a new, full squadron at one of their airbases. It arrives at the push and flies from the next turn.</p>
+            </>
+          )}
           <Field label="Description (players see it)" wide>
             <textarea rows={2} maxLength={1000} value={edit.description ?? ''} onChange={(e) => set({ description: e.target.value })} />
           </Field>
@@ -214,11 +258,13 @@ function TreeTab({ backend, map, busy, run }: { backend: Backend; map: MapMeta; 
               ))}
             </div>
           </Field>
+          {edit.category !== 'squadron' && (
           <label className="check">
             <input type="checkbox" checked={edit.buyable} onChange={(e) => set({ buyable: e.target.checked, ...(e.target.checked && !edit.sidc && !edit.asset_id ? { sidc: buildSidc(symbolDraft) } : {}) })} />
             Players can buy it as a unit (untick for a research-only node)
           </label>
-          {edit.buyable && (
+          )}
+          {edit.buyable && edit.category !== 'squadron' && (
             <>
               <Field label="Unit" wide>
                 <select
@@ -273,6 +319,7 @@ function TreeTab({ backend, map, busy, run }: { backend: Backend; map: MapMeta; 
               )}
             </>
           )}
+          {edit.category !== 'squadron' && (<>
           <h4>{edit.category === 'building' ? 'Each building of this type on the map' : 'Each unit of this type on the map'}</h4>
           <div className="row2">
             <Field label="Spawn points per turn"><input type="number" min={0} value={edit.income_spawn} onChange={(e) => set({ income_spawn: int(e.target.value) })} /></Field>
@@ -296,8 +343,9 @@ function TreeTab({ backend, map, busy, run }: { backend: Backend; map: MapMeta; 
               />
             </Field>
           )}
+          </>)}
           <div className="row2 wrap">
-            <button type="button" className="btn primary" disabled={busy || !edit.name.trim() || (edit.buyable && !edit.sidc && !edit.asset_id)} onClick={save}>Save</button>
+            <button type="button" className="btn primary" disabled={busy || !edit.name.trim() || (edit.category !== 'squadron' && edit.buyable && !edit.sidc && !edit.asset_id) || (edit.category === 'squadron' && !edit.airframe_id)} onClick={save}>Save</button>
             <button type="button" className="btn" onClick={() => setEdit(null)}>Close</button>
             <button type="button" className="btn danger" disabled={busy} onClick={() => void remove()}>Delete</button>
           </div>
@@ -424,7 +472,7 @@ const whoValue = (z: Pick<SpawnZone, 'player_id' | 'team'>) => (z.player_id ? z.
 const whoTarget = (who: string) => (who === '' ? { player_id: null, team: null } : who.startsWith('team:') ? { player_id: null, team: who.slice(5) } : { player_id: who, team: null });
 
 function ZonesTab({ backend, map, busy, run, onClose }: { backend: Backend; map: MapMeta; busy: boolean; run: Run; onClose(): void }) {
-  const zones = useEd((s) => s.bundle?.economy.zones ?? []);
+  const zones = useEd((s) => s.bundle?.economy.zones ?? NONE);
   const features = useEd((s) => s.features);
   const selection = useEd((s) => s.selection);
   const [who, setWho] = useState('');

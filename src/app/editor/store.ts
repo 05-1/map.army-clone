@@ -28,6 +28,8 @@ interface Ed extends Doc {
   combat: import('../lib/types').CombatAdmin | null;
   /** Draw the terrain zones on the map. */
   showTerrain: boolean;
+  /** Airframes, missile families and tiers, squadrons and airbases. */
+  air: import('../lib/types').AirAdmin | null;
   /** Draw all drafts, zones and conflicts over the live map (turn panel open). */
   showDrafts: boolean;
   /** The player whose draft is being edited. While set, the live map is locked. */
@@ -96,6 +98,7 @@ export const useEd = create<Ed>()((set, get) => ({
   zoneDraw: false,
   combat: null,
   showTerrain: false,
+  air: null,
   viewing: null,
   selection: [],
   tool: 'select',

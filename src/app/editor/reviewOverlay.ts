@@ -21,7 +21,7 @@ export class ReviewOverlay {
   constructor(private map: MlMap, urlFor: (a: Asset) => string, private onCommit: (playerId: string) => void) {
     this.renderer = new SceneRenderer(map, urlFor, { source: 'ghost', prefix: 'gh', opacity: 0.62 });
     this.unsub = useEd.subscribe((s, p) => {
-      if (s.review !== p.review || s.bundle !== p.bundle || s.showDrafts !== p.showDrafts || s.viewing !== p.viewing
+      if (s.air !== p.air || s.review !== p.review || s.bundle !== p.bundle || s.showDrafts !== p.showDrafts || s.viewing !== p.viewing
         || s.features !== p.features || s.assets !== p.assets || s.players !== p.players) this.draw();
     });
     map.on('mousedown', this.onDown);
@@ -80,6 +80,26 @@ export class ReviewOverlay {
         for (const a of c.payload.attacks) {
           const to = finalPos(a.target);
           if (from && to) extra(`atk~${c.feature_id}~${a.slot}`, 'arrow', { type: 'LineString', coordinates: [from, to] }, {}, { color: '#ff453a', width: 2, dash: 'dash' });
+        }
+      }
+    }
+    // Air missions: route from the squadron's base, patrol and recon circles.
+    const air = s.air;
+    if (air) {
+      for (const d of accepted) {
+        const color = colorOf(d.player_id);
+        for (const c of d.changes) {
+          if (c.op !== 'mission') continue;
+          const q = air.squadrons.find((x) => x.id === c.feature_id);
+          const base = air.bases.find((x) => x.id === q?.base_feature_id)?.pos;
+          const strikeOf = (id: string) => d.changes.find((x) => x.op === 'mission' && x.feature_id === id);
+          const tgtOf = (p: typeof c.payload): Pos | null => p.type === 'strike' ? finalPos(p.target_unit ?? '') : p.type === 'escort' ? (() => { const st = strikeOf(p.escort_of ?? ''); return st?.op === 'mission' ? tgtOf(st.payload) : null; })() : p.target ?? null;
+          const to = tgtOf(c.payload);
+          if (!base || !to) continue;
+          extra(`air~${c.feature_id}`, 'arrow', { type: 'LineString', coordinates: [base, to] }, {}, { color, width: 2, dash: 'dot' });
+          const sett = s.combat?.settings;
+          if (c.payload.type === 'patrol') extra(`airp~${c.feature_id}`, 'circle', { type: 'Point', coordinates: to }, { radius: c.payload.radius_m ?? (sett?.patrol_radius_km ?? 50) * 1000 }, { color, width: 1.5, dash: 'dash', fillOpacity: 0.05 });
+          if (c.payload.type === 'recon') extra(`airr~${c.feature_id}`, 'circle', { type: 'Point', coordinates: to }, { radius: (sett?.recon_radius_km ?? 25) * 1000 }, { color, width: 1.5, dash: 'dot', fillOpacity: 0.03 });
         }
       }
     }

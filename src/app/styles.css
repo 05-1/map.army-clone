@@ -365,3 +365,36 @@ input:disabled, select:disabled { opacity: 0.45; }
 .sandbox { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 @media (max-width: 760px) { .sandbox { grid-template-columns: 1fr; } }
 .targetbtn { justify-content: flex-start; }
+
+/* ---------- air ---------- */
+.loadout { display: grid; gap: 10px; }
+.loadout .kv > div { display: grid; gap: 3px; }
+.lfam h4 { display: flex; align-items: center; gap: 6px; margin: 4px 0; }
+.wlist li { display: flex; align-items: center; gap: 8px; padding: 4px 0; border-top: 1px solid var(--line); }
+.wlist li.off { opacity: 0.55; }
+.wlist .lname { flex: 1; min-width: 0; }
+.stepper { display: inline-flex; align-items: center; gap: 6px; }
+.stepper b { min-width: 18px; text-align: center; font-family: var(--mono); }
+.sqcard { border: 1px solid var(--line); border-radius: 8px; padding: 8px; display: grid; gap: 6px; background: var(--bg); }
+.sqcard header { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.sqcard .acts { display: flex; flex-wrap: wrap; gap: 4px; }
+.mtypes { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; }
+.mtypes .btn { height: auto; padding: 6px 8px; display: grid; justify-items: start; text-align: left; gap: 2px; }
+.mtypes .btn small { color: var(--mute); font-weight: 400; white-space: normal; }
+.matrix { width: 100%; border-collapse: collapse; font-size: 12px; }
+.matrix th { text-align: left; color: var(--mute); font-weight: 500; padding: 4px; }
+.matrix td { border-top: 1px solid var(--line); padding: 3px 4px; }
+.matrix input[type='number'] { width: 70px; }
+.chain { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.chain .btn { height: auto; padding: 4px 8px; }
+
+/* ---------- player air ---------- */
+.airbase { display: grid; gap: 6px; margin-bottom: 8px; }
+.airbase h4 { font-size: 12px; font-weight: 600; }
+.sqcard.on { border-color: var(--accent); }
+.sqcard.pending { border-style: dashed; }
+.sqcard .inline { flex-wrap: wrap; }
+.msn { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+.msn select { height: 26px; }
+.revealed { border: 1px solid var(--accent); border-radius: 6px; padding: 6px 8px; font-size: 12px; }
+.sqline { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
