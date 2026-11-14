@@ -236,6 +236,12 @@ export function PropertiesPanel({ onAssign, backend, refreshCombat }: { onAssign
               <input type="number" min={12} max={120} value={val('sizePx') ?? 34} onFocus={cp} onChange={(e) => setP({ sizePx: num(e.target.value, 12, 120) })} />
             </Field>
           </div>
+          <Field label={val('made_by') ? "Fill colour (the player's colour; follows changes to it)" : 'Fill colour (blank = affiliation colour)'} wide>
+            <span className="inline">
+              <ColorPicker value={val('tint') ?? ''} onFocus={cp} onChange={(tint) => setP({ tint })} />
+              <button type="button" className="btn sm" disabled={!val('tint')} onClick={() => (cp(), setP({ tint: null }))}>Clear</button>
+            </span>
+          </Field>
         </>
       )}
 

@@ -326,4 +326,18 @@ describe('tech tree', () => {
     expect((await save(A1, id.p1, [research(id.late), buy(id.freeLate, 72, 12)])).count).toBe(2);
     await save(A1, id.p1, []);
   });
+
+  it("units a player creates wear the player's colour, and follow a colour change", async () => {
+    await rpc(OWNER, 'update_player', id.p1, J({ color: '#ff0000' }));
+    await rpc(OWNER, 'set_player_points', id.p1, 100, null);
+    const b = buy(id.heli, 73, 13);
+    (b.payload as Row).props = { name: 'x', tint: '#00ff00', made_by: id.p2 };          // cannot be forged
+    await save(A1, id.p1, [b]);
+    const draft = (await q('select changes from public.drafts d join public.turns t on t.id = d.turn_id where d.player_id = $1 and t.status = $2', [id.p1, 'open']))[0].changes;
+    expect(draft[0].payload.props).toMatchObject({ tint: '#ff0000', made_by: id.p1 });
+    await push();
+    expect((await q('select props from public.features where id = $1', [b.feature_id]))[0].props).toMatchObject({ tint: '#ff0000', made_by: id.p1 });
+    await rpc(OWNER, 'update_player', id.p1, J({ color: '#0000ff' }));
+    expect((await q('select props from public.features where id = $1', [b.feature_id]))[0].props.tint).toBe('#0000ff');
+  });
 });

@@ -182,8 +182,10 @@ export class PlayController {
     if (remaining(a, s.draft) <= 0) return s.say('None left in that allocation');
     if (!inZone(a.zone, at)) return s.say('Outside the placement zone (dashed outline)');
     const left = remaining(a, s.draft) - 1;
-    if (a.asset_id) this.create({ kind: 'asset', geometry, asset_id: a.asset_id, allocation_id: a.id, props: a.props });
-    else this.create({ kind: 'symbol', geometry, allocation_id: a.id, props: { ...a.props, sidc: a.sidc ?? undefined } });
+    // In my colour straight away; the server sets the same when the draft is saved.
+    const tint = s.state?.player.color ?? undefined;
+    if (a.asset_id) this.create({ kind: 'asset', geometry, asset_id: a.asset_id, allocation_id: a.id, props: { ...a.props, tint } });
+    else this.create({ kind: 'symbol', geometry, allocation_id: a.id, props: { ...a.props, sidc: a.sidc ?? undefined, tint } });
     // Keep placing while there are units left in the allocation.
     if (left > 0 && S().sel) usePlay.setState({ tool: 'place', allocId: a.id });
   }
@@ -198,7 +200,7 @@ export class PlayController {
     if (pointsLeft().spawn < it.spawn_cost) return s.say(`Not enough spawn points for ${it.name}`);
     if (!canPlace(it, at, st.spawn_zones, st.spawn_points)) return s.say(`${it.name} must be placed ${whereText(it, st.tech)} (dashed outlines)`);
     const geometry: Feature['geometry'] = { type: 'Point', coordinates: at };
-    const props = { ...it.props, name: it.props.name || it.name };
+    const props = { ...it.props, name: it.props.name || it.name, tint: st.player.color ?? undefined };
     if (it.asset_id) this.create({ kind: 'asset', geometry, asset_id: it.asset_id, purchase_id: it.id, props });
     else this.create({ kind: 'symbol', geometry, purchase_id: it.id, props: { ...props, sidc: it.sidc ?? undefined } });
     // Keep buying while the player can afford another.

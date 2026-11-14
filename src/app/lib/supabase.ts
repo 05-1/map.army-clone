@@ -16,7 +16,7 @@ export const SUPABASE_URL = ok(cfg?.supabaseUrl)?.replace(/\/+$/, '') ?? (import
 export const SUPABASE_KEY = ok(cfg?.supabaseAnonKey) ?? (import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined);
 
 /** The database schema this build of the app expects. Bump together with setup.sql. */
-export const SCHEMA_VERSION = 8;
+export const SCHEMA_VERSION = 9;
 
 /** null when config.js has not been filled in yet. */
 export const supabase: SupabaseClient | null = SUPABASE_URL && SUPABASE_KEY ? createClient(SUPABASE_URL, SUPABASE_KEY) : null;

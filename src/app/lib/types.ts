@@ -37,6 +37,8 @@ export interface Props {
   tech?: string;
   /** Unit template (combat stats). Absent = from the tech item, or matched by graphic / symbol. */
   unit?: string;
+  /** Player who created this unit; it wears their colour (tint) and follows changes to it. */
+  made_by?: string;
 }
 
 export interface Feature {

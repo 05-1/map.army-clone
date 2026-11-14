@@ -181,6 +181,8 @@ await step('owner reviews costs and pushes', async () => {
   const p = await me();
   const tank = (await sql(`select id from public.tech_items where name = 'Tank'`))[0].id;
   // 50 - 20 (depot) - 15 (tank) + 2 depots x 5 income = 25; 10 - 10 research; Tank unlocked.
+  const made = await sql(`select f.props, p.color from public.features f join public.players p on p.id::text = f.props ->> 'made_by'`);
+  check("bought units wear the player's colour", made.length === 2 && made.every((x) => x.props.tint === x.color && !!x.color), JSON.stringify(made.map((x) => [x.props.tint, x.color])));
   check('push charged costs, paid income from both depots, unlocked Tank', p.spawn_points === 25 && p.research_points === 0 && p.tech_unlocked.includes(tank), JSON.stringify(p));
 });
 

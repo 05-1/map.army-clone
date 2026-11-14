@@ -723,6 +723,7 @@ as $$
      and (props -> 'showLabel' is null or jsonb_typeof(props -> 'showLabel') = 'boolean')
      and private.str_ok(props -> 'tech', 36, '^[0-9a-f-]{36}$')
      and private.str_ok(props -> 'unit', 36, '^[0-9a-f-]{36}$')
+     and private.str_ok(props -> 'made_by', 36, '^[0-9a-f-]{36}$')
      and private.str_ok(style -> 'color', 7, '^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$')
      and private.str_ok(style -> 'dash', 5, '^(solid|dash|dot)$')
      and private.num_in(style -> 'width', 1, 16)
@@ -1126,6 +1127,12 @@ begin
                    || case when it.template_id is not null then jsonb_build_object('unit', it.template_id) else '{}'::jsonb end,
           'style', '{}'::jsonb);
       end if;
+    end if;
+    -- Units a player creates wear that player's colour (tint on graphics, fill on NATO symbols) and remember
+    -- who made them, so a later colour change follows. Also for drafts the owner edited.
+    if op = 'create' and clean ->> 'kind' in ('symbol', 'asset') then
+      clean := clean || jsonb_build_object('props', (coalesce(clean -> 'props', '{}') - 'tint')
+                 || jsonb_build_object('made_by', p.id) || case when p.color is not null then jsonb_build_object('tint', p.color) else '{}'::jsonb end);
     end if;
     if not (fid = any (p_rejected)) then
       pp.tech_unlocked := p.tech_unlocked || case when op = 'create' then fresh when op = 'research' then array_remove(fresh, fid) else '{}' end;
@@ -1605,6 +1612,11 @@ begin
     target_layer_id = case when p_patch ? 'target_layer_id' then nullif(p_patch ->> 'target_layer_id', '')::uuid else x.target_layer_id end,
     revoked = case when p_patch ? 'revoked' then (p_patch ->> 'revoked')::boolean else x.revoked end
   where x.id = p_player_id returning * into r;
+  -- Units this player created follow their colour.
+  if p_patch ? 'color' then
+    update public.features f set props = (f.props - 'tint') || case when r.color is not null then jsonb_build_object('tint', r.color) else '{}'::jsonb end
+     where f.map_id = r.map_id and f.props ->> 'made_by' = r.id::text;
+  end if;
   if p_patch ? 'revoked' then
     perform private.log(r.map_id, private.actor(), case when r.revoked then 'revoked player' else 'restored player' end, r.name);
   end if;
@@ -3230,7 +3242,7 @@ exception when others then
   raise notice 'pg_net is not available here; Discord announcements are disabled';
 end $$;
 
-insert into public.app_meta (key, value) values ('schema_version', '8')
+insert into public.app_meta (key, value) values ('schema_version', '9')
 on conflict (key) do update set value = excluded.value, updated_at = now();
 
 commit;

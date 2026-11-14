@@ -19,7 +19,7 @@ const U1 = [-160, -60], U2 = [120, 80];
 await step('first run and claim', async () => {
   await ed.goto(B + '/'); await wait(ed, 1200);
   const first = await ed.locator('body').innerText();
-  check('first-run page reports connection, schema and anonymous sign-ins', /Connected to/.test(first) && /schema version 8/.test(first) && /Anonymous sign-ins/.test(first));
+  check('first-run page reports connection, schema and anonymous sign-ins', /Connected to/.test(first) && /schema version 9/.test(first) && /Anonymous sign-ins/.test(first));
   await ed.fill('input[type=email]', 'owner@example.com'); await ed.fill('input[type=password]', 'correct horse battery');
   await ed.getByRole('button', { name: 'Create account' }).click(); await wait(ed, 1200);
   const claim = ed.getByRole('button', { name: /claim/i });

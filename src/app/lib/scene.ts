@@ -79,6 +79,7 @@ export function buildScene(layers: Pick<Layer, 'id' | 'z'>[], features: Feature[
         if (p.type) o.type = p.type;
         if (p.speed) o.speed = p.speed;
         if (p.heading != null) o.direction = p.heading;
+        if (p.tint) o.fillColor = p.tint; // a player's colour, or one set by the owner
         const sidc = p.sidc || 'SUGP-----------';
         push(g, { fid: f.id, sort, mode: 'up', icon: img({ id: `ms:${sidc}:${size}:${JSON.stringify(o)}`, t: 'ms', sidc, size, o }) });
         break;
