@@ -9,6 +9,7 @@ import { draftCost, fmtPts, toggleRejected } from '../lib/tech';
 import type { Allocation, Draft, Feature, MapMeta, Player, Turn, Zone } from '../lib/types';
 import type { Backend, TurnPatch } from './backend';
 import { useEd } from './store';
+import { CombatReview, ensureCombatPreview } from './CombatReview';
 import { Field, IconButton, Section } from './ui';
 
 interface Props {
@@ -81,8 +82,9 @@ export function TurnPanel({ backend, map, settle, refresh, reload }: Props) {
     void act(
       async () => {
         await settle(); // the push works on the server's copy of the map
+        const combat = await ensureCombatPreview(backend, turn.id);   // recomputed only if something changed since the preview
         const r = await backend.pushTurn(turn.id);
-        useEd.getState().say(`Turn ${r.pushed} is live (${r.applied} changes). Turn ${r.next} is open.`);
+        useEd.getState().say(`Turn ${r.pushed} is live (${r.applied} changes${combat === 'none' ? '' : ', combat applied'}). Turn ${r.next} is open.`);
       },
       reload,
     );
@@ -117,6 +119,7 @@ export function TurnPanel({ backend, map, settle, refresh, reload }: Props) {
       <MoveRules backend={backend} turn={turn} act={act} />
       <Allocations backend={backend} turn={turn} act={act} />
       <Drafts backend={backend} turn={turn} act={act} />
+      {turn.status === 'locked' && <CombatReview backend={backend} turn={turn} />}
     </>
   );
 }

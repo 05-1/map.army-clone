@@ -6,6 +6,9 @@ import { Measure, type MeasureState } from '../lib/measure';
 import { MEASURE_IDLE, MeasurePanel } from '../lib/MeasurePanel';
 import { ExportDialog } from '../lib/ExportDialog';
 import { attributionText } from '../lib/exportmap';
+import { setTerrain } from '../lib/terrainLayer';
+import { TerrainLegend } from '../lib/TerrainLegend';
+import type { FeatureCollection } from 'geojson';
 import { createRoot } from 'react-dom/client';
 import { asBasemap, BASEMAP_IDS, BASEMAPS, setBasemap } from '../lib/basemaps';
 import { fmtDist, fmtLatLon } from '../lib/geo';
@@ -38,6 +41,18 @@ function Viewer({ token }: { token: string }) {
   const [state, setState] = useState<State>({ s: 'loading' });
   const [title, setTitle] = useState('');
   const [measuring, setMeasuring] = useState(false);
+  const [terrainOn, setTerrainOn] = useState(false);
+  const [terrainEmpty, setTerrainEmpty] = useState(false);
+  useEffect(() => {
+    const m = mapRef.current;
+    if (!m) return;
+    if (!terrainOn) return void setTerrain(m, null);
+    supabase!.rpc('get_shared_terrain', { p_token: token }).then(({ data, error }) => {
+      if (error || !data) return;
+      setTerrain(m, data as FeatureCollection);
+      setTerrainEmpty(!(data as FeatureCollection).features.length);
+    });
+  }, [terrainOn, token]);
   const [exporting, setExporting] = useState(false);
   const measureRef = useRef<Measure | null>(null);
   const measuringRef = useRef(false);
@@ -196,6 +211,7 @@ function Viewer({ token }: { token: string }) {
             <span className="grow" />
             <button type="button" className={`btn sm${measuring ? ' on' : ''}`} aria-pressed={measuring} onClick={() => (setMeasuring(!measuring), setPicked(null))}>Measure</button>
             <button type="button" className="btn sm" onClick={() => setExporting(true)}>Export</button>
+            <button type="button" className={`btn sm${terrainOn ? ' on' : ''}`} aria-pressed={terrainOn} onClick={() => setTerrainOn(!terrainOn)}>Terrain</button>
             <div className="seg compact" role="group" aria-label="Basemap">
               {BASEMAP_IDS.map((id) => (
                 <button
@@ -213,6 +229,7 @@ function Viewer({ token }: { token: string }) {
             </div>
           </div>
           {picked && <Details f={picked} onClose={() => setPicked(null)} />}
+          {terrainOn && <TerrainLegend empty={terrainEmpty} />}
           {measuring && <div className="measurebox"><MeasurePanel m={measureRef.current} s={measured} onClose={() => setMeasuring(false)} /></div>}
           {exporting && (
             <ExportDialog

@@ -335,3 +335,33 @@ input:disabled, select:disabled { opacity: 0.45; }
   .play .ib { width: 34px; height: 34px; }
   .play input[type='range'] { height: 28px; }
 }
+
+/* ---------- combat and terrain ---------- */
+.terrainlegend { position: absolute; right: 10px; bottom: 96px; z-index: 4; display: grid; gap: 4px; padding: 8px 10px; max-width: 260px; background: #14191fe6; border: 1px solid var(--line); border-radius: 8px; font-size: 12px; }
+.terrainlegend ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 3px; }
+.terrainlegend small { color: var(--mute); }
+.terrainlegend .credit { font-size: 10px; }
+.stage .terrainlegend { bottom: 120px; }
+.cbar { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
+.cbar > i { display: block; height: 100%; background: var(--ok); }
+.cbar.mid > i { background: var(--accent); }
+.cbar.low > i { background: var(--danger); }
+.band { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; }
+.band.fresh { color: var(--ok); } .band.damaged { color: var(--accent); } .band.heavily-damaged, .band.critical, .band.destroyed { color: var(--danger); }
+.shots { width: 100%; border-collapse: collapse; font-size: 11px; }
+.shots th { text-align: left; color: var(--mute); font-weight: 500; padding: 3px 4px; }
+.shots td { border-top: 1px solid var(--line); padding: 3px 4px; vertical-align: top; }
+.shots td.num { font-family: var(--mono); white-space: nowrap; }
+.shots input { width: 64px; }
+.shots .mults { color: var(--mute); }
+.shots tr.edited td { background: #f2a93b14; }
+.engcard { border: 1px solid var(--line); border-radius: 8px; padding: 8px; display: grid; gap: 6px; background: var(--bg); }
+.engcard header { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.kv { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+.setgrp { border: 1px solid var(--line); border-radius: 8px; padding: 10px; display: grid; gap: 8px; }
+.setgrp h4 { margin: 0; }
+.wlist { display: grid; gap: 4px; }
+.wlist li { display: flex; align-items: center; gap: 6px; }
+.sandbox { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 760px) { .sandbox { grid-template-columns: 1fr; } }
+.targetbtn { justify-content: flex-start; }

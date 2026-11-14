@@ -5,6 +5,8 @@ import { asBasemap } from '../lib/basemaps';
 import type { RealtimeChannel, SupabaseClient } from '@supabase/supabase-js';
 import type { Diff } from '../lib/diff';
 import { ASSET_BUCKET, liveChannelName, publicAssetUrl, supabase } from '../lib/supabase';
+import type { CombatInputs, CombatResult, PreviewData } from '../lib/combat';
+import type { CombatAdmin, UnitTemplate, WeaponProfile } from '../lib/types';
 import type { Allocation, Asset, Change, Economy, Feature, Layer, MapMeta, Player, ShareLink, SnapshotPayload, SpawnZone, TechItem, Turn, TurnBundle } from '../lib/types';
 import type { PreparedUpload } from '../lib/upload';
 
@@ -235,6 +237,19 @@ export class Backend {
     this.rpc<void>('set_player_points', { p_player_id: playerId, p_spawn: spawn, p_research: research });
   setPlayerTech = (playerId: string, itemId: string, unlocked: boolean) =>
     this.rpc<void>('set_player_tech', { p_player_id: playerId, p_item_id: itemId, p_unlocked: unlocked });
+
+  // ---- ground combat ----
+  getCombatAdmin = (mapId: string) => this.rpc<CombatAdmin>('get_combat_admin', { p_map_id: mapId });
+  saveWeapon = (mapId: string, w: Partial<WeaponProfile> & { deleted?: boolean }) => this.rpc<string>('save_weapon', { p_map_id: mapId, p: w });
+  saveUnitTemplate = (mapId: string, t: Partial<UnitTemplate> & { deleted?: boolean }) => this.rpc<string>('save_unit_template', { p_map_id: mapId, p: t });
+  saveCombatSettings = (mapId: string, s: Record<string, unknown>) => this.rpc<number>('save_combat_settings', { p_map_id: mapId, p: s });
+  setUnitState = (featureId: string, patch: { strength?: number; experience?: number; stationary_turns?: number }) => this.rpc<void>('set_unit_state', { p_feature_id: featureId, p: patch });
+  endEngagement = (id: string) => this.rpc<void>('end_engagement', { p_id: id });
+  getCombatInputs = (turnId: string) => this.rpc<CombatInputs>('get_combat_inputs', { p_turn_id: turnId });
+  saveCombatPreview = (turnId: string, data: PreviewData, result: CombatResult) => this.rpc<{ signature: string }>('save_combat_preview', { p_turn_id: turnId, p: { data, result } });
+  getCombatPreview = (turnId: string) => this.rpc<{ data: PreviewData; result: CombatResult; created_at: string; stale: boolean } | null>('get_combat_preview', { p_turn_id: turnId });
+  replaceTerrain = (mapId: string, p: { zones: unknown[]; area: unknown; source: string; options: unknown }) => this.rpc<import('../lib/types').TerrainStats>('replace_terrain', { p_map_id: mapId, p });
+  getTerrain = (mapId: string) => this.rpc<GeoJSON.FeatureCollection & { stats: import('../lib/types').TerrainStats; area: unknown }>('get_terrain', { p_map_id: mapId });
 
   // ---- history ----
   getSnapshot = (mapId: string, turn: number) => this.rpc<SnapshotPayload | null>('get_snapshot', { p_map_id: mapId, p_turn: turn });

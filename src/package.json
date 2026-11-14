@@ -13,6 +13,8 @@
   },
   "devDependencies": {
     "@electric-sql/pglite": "^0.5.16",
+    "@electric-sql/pglite-postgis": "^0.2.16",
+    "@types/d3-contour": "^3.0.6",
     "@types/geojson": "^7946.0.16",
     "@types/node": "^26.6.6",
     "@types/react": "^19.3.0",
@@ -26,14 +28,17 @@
   },
   "type": "module",
   "dependencies": {
+    "@mapbox/vector-tile": "^2.0.5",
     "@supabase/supabase-js": "^2.119.0",
     "@turf/bearing": "^7.4.0",
     "@turf/circle": "^7.4.0",
     "@turf/destination": "^7.4.0",
     "@turf/distance": "^7.4.0",
+    "d3-contour": "^4.0.3",
     "dompurify": "^3.4.17",
     "maplibre-gl": "^6.17.0",
     "milsymbol": "^3.0.5",
+    "pbf": "^4.0.2",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
     "zustand": "^5.1.0"

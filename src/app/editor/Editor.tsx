@@ -22,6 +22,9 @@ import { PropertiesPanel, StylePanel } from './PropertiesPanel';
 import { ReviewOverlay } from './reviewOverlay';
 import { ShareDialog } from './ShareDialog';
 import { TechDialog, type TechTab } from './TechDialog';
+import { CombatDialog, type CombatTab } from './CombatDialog';
+import { setTerrain } from '../lib/terrainLayer';
+import { TerrainLegend } from '../lib/TerrainLegend';
 import { TurnPanel } from './TurnPanel';
 import { useEd, type Tool } from './store';
 import { Icon, IconButton, Section } from './ui';
@@ -100,6 +103,24 @@ function Workspace({ backend, who, meta, maps, setMaps, onSignOut, onSwitch, onP
   const [managingPlayers, setManagingPlayers] = useState(false);
   const [admin, setAdmin] = useState<AdminTab | null>(null);
   const [teching, setTeching] = useState<TechTab | null>(null);
+  const [fighting, setFighting] = useState<CombatTab | null>(null);
+  const showTerrain = useEd((s) => s.showTerrain);
+  const combat = useEd((s) => s.combat);
+  const [terrainEmpty, setTerrainEmpty] = useState(false);
+  const refreshCombat = useCallback(async () => {
+    const c = await backend.getCombatAdmin(meta.id);
+    useEd.setState({ combat: c });
+  }, [backend, meta.id]);
+  const [terrainRev, setTerrainRev] = useState(0);
+  // Terrain overlay: loaded when shown, reloaded after a (re)generation.
+  useEffect(() => {
+    if (!map) return;
+    if (!showTerrain) return void setTerrain(map, null);
+    backend.getTerrain(meta.id).then((fc) => {
+      setTerrain(map, fc);
+      setTerrainEmpty(!fc.features.length);
+    }, (e) => useEd.getState().say((e as Error).message));
+  }, [map, showTerrain, terrainRev, backend, meta.id]);
   const measureRef = useRef<Measure | null>(null);
   const [measured, setMeasured] = useState<MeasureState>(MEASURE_IDLE);
   const [exporting, setExporting] = useState(false);
@@ -241,6 +262,7 @@ function Workspace({ backend, who, meta, maps, setMaps, onSignOut, onSwitch, onP
         disposers.push(unsub, () => renderer.destroy(), () => ghosts.destroy(), () => ix.destroy(), () => saver.stop(), () => window.removeEventListener('tacmap:save', onSave));
 
         backend.listPlayers(meta.id).then((list) => !cancelled && useEd.setState({ players: list }), () => {});
+        backend.getCombatAdmin(meta.id).then((c) => !cancelled && useEd.setState({ combat: c }), () => {});
         const poke = () => void refreshTurn().catch(() => {});
         poke();
         disposers.push(backend.watchDrafts(meta, poke));
@@ -317,6 +339,7 @@ function Workspace({ backend, who, meta, maps, setMaps, onSignOut, onSwitch, onP
         <button type="button" className="btn" title="Save the map as a PNG image or PDF" onClick={() => setExporting(true)}>Export</button>
         <button type="button" className="btn" onClick={() => setManagingPlayers(true)}>Players</button>
         <button type="button" className="btn" title="Tech tree, player points and spawn zones" onClick={() => (useEd.setState({ zoneDraw: false }), setTeching('tree'))}>Tech</button>
+        <button type="button" className="btn" title="Unit templates, weapons, combat settings, terrain, sandbox" onClick={() => setFighting('units')}>Combat</button>
         <button
           type="button"
           className={`btn${turnOpen ? ' on' : ''}`}
@@ -350,6 +373,7 @@ function Workspace({ backend, who, meta, maps, setMaps, onSignOut, onSwitch, onP
           <div className="banner" role="status">Editing {reviewing.name}'s draft ({pendingEdits} changes). Drag their ghosts; the live map is locked until you click "Done editing".</div>
         ) : null}
         {toast && <div className="toast" role="status">{toast}</div>}
+        {showTerrain && <TerrainLegend multipliers={combat?.settings.terrain} empty={terrainEmpty} />}
       </main>
 
       <aside className="right">
@@ -361,7 +385,7 @@ function Workspace({ backend, who, meta, maps, setMaps, onSignOut, onSwitch, onP
             {tool === 'asset' && <AssetLibrary backend={backend} />}
             {tool === 'measure' && <Section title="Measure"><MeasurePanel m={measureRef.current} s={measured} onClose={() => st().setTool('select')} /></Section>}
             {tool !== 'select' && tool !== 'symbol' && tool !== 'asset' && tool !== 'measure' && <StylePanel />}
-            {hasSel && <PropertiesPanel onAssign={assign} />}
+            {hasSel && <PropertiesPanel onAssign={assign} backend={backend} refreshCombat={refreshCombat} />}
             {tool === 'select' && !hasSel && <Help />}
           </>
         )}
@@ -371,6 +395,7 @@ function Workspace({ backend, who, meta, maps, setMaps, onSignOut, onSwitch, onP
         <span ref={coordEl} className="mono">–</span>
         <span className="mono hint">{hint}</span>
         <span className="grow" />
+        <button type="button" className={`btn sm${showTerrain ? ' on' : ''}`} aria-pressed={showTerrain} title="Show urban and forest terrain zones" onClick={() => useEd.setState({ showTerrain: !showTerrain })}>Terrain</button>
         <TurnSlider history={bundle?.history ?? []} viewing={viewing?.viewing ?? null} current={bundle?.turn?.number} rollbackOf={bundle?.turn?.rollback_of} onPick={(n) => void pickTurn(n)} />
         <span className={`pill ${saveStatus}`}>{saveLabel}</span>
       </footer>
@@ -382,6 +407,10 @@ function Workspace({ backend, who, meta, maps, setMaps, onSignOut, onSwitch, onP
           subtitle={`${viewing ? `Turn ${viewing.viewing}` : bundle?.turn ? `Turn ${bundle.turn.number} in progress` : 'Live map'} · ${new Date().toLocaleDateString()}`}
           prepare={() => st().select([])} onClose={() => setExporting(false)}
         />
+      )}
+      {fighting && (
+        <CombatDialog backend={backend} map={meta} tab={fighting} getMap={() => map} refresh={refreshCombat}
+          onTerrain={() => setTerrainRev((n) => n + 1)} onClose={() => (setFighting(null), void refreshCombat().catch(() => {}))} />
       )}
       {teching && <TechDialog backend={backend} map={meta} tab={teching} refresh={refreshTurn} onClose={() => setTeching(null)} />}
       {managingPlayers && <PlayersDialog backend={backend} map={meta} settle={settle} onClose={() => setManagingPlayers(false)} />}

@@ -2,6 +2,7 @@
 // owner-only RPC (save_tech_item, move_tech_items, set_player_points, save_spawn_zone, ...); nothing here
 // needs the Supabase dashboard.
 import { useEffect, useMemo, useState } from 'react';
+import { loadCountries, type Country } from '../lib/countries';
 import { fmtDist } from '../lib/geo';
 import { symbolDataUrl } from '../lib/images';
 import { zoneFromFeature } from '../lib/submissions';
@@ -81,7 +82,7 @@ type Run = (fn: () => Promise<unknown>) => Promise<boolean>;
 const BLANK: TechItem = {
   id: '', name: '', description: null, tier: 0, sort: 0, research_cost: 10, spawn_cost: 10, prereqs: [], buyable: true,
   asset_id: null, sidc: null, props: {}, income_spawn: 0, income_research: 0, spawn_radius_m: null, placement: 'either', pos_x: null, pos_y: null,
-  category: 'unit', can_move: true, spawn_from: [], move_range_m: null, release_turn: null,
+  category: 'unit', can_move: true, spawn_from: [], move_range_m: null, release_turn: null, template_id: null,
 };
 /** A production building: players build it with spawn points, it stays put, and units are placed around it. */
 const BUILDING: Partial<TechItem> = { category: 'building', can_move: false, buyable: true, spawn_radius_m: 5000, placement: 'zone', spawn_cost: 50, research_cost: 0 };
@@ -95,6 +96,7 @@ const body = (it: TechItem) => {
 function TreeTab({ backend, map, busy, run }: { backend: Backend; map: MapMeta; busy: boolean; run: Run }) {
   const items = useEd((s) => s.bundle?.economy.items ?? []);
   const turnNo = useEd((s) => s.bundle?.turn?.number ?? null);
+  const templates = useEd((s) => s.combat?.templates ?? []);
   const assets = useEd((s) => s.assets);
   const symbolDraft = useEd((s) => s.symbolDraft);
   const [edit, setEdit] = useState<TechItem | null>(null);
@@ -241,6 +243,12 @@ function TreeTab({ backend, map, busy, run }: { backend: Backend; map: MapMeta; 
                   />
                 </Field>
               )}
+              <Field label="Combat stats (unit template)" wide>
+                <select value={edit.template_id ?? ''} onChange={(e) => set({ template_id: e.target.value || null })}>
+                  <option value="">None (or matched by symbol / graphic)</option>
+                  {templates.filter((t) => !t.deleted_at || t.id === edit.template_id).map((t) => <option key={t.id} value={t.id}>{t.name} ({t.category}, strength {t.max_strength})</option>)}
+                </select>
+              </Field>
               <Field label="Default unit name (players can rename)" wide>
                 <input value={edit.props.name ?? ''} maxLength={80} onChange={(e) => set({ props: { ...edit.props, name: e.target.value || undefined } })} />
               </Field>
@@ -400,14 +408,6 @@ function PointsTab({ backend, busy, run }: { backend: Backend; busy: boolean; ru
     </>
   );
 }
-
-interface Country { name: string; geometry: Extract<Zone, { type: 'MultiPolygon' }> }
-let countries: Promise<Country[]> | null = null;
-/** Natural Earth 1:50m borders, shipped with the site and fetched only when needed (about 1.7 MB). */
-const loadCountries = () => (countries ??= fetch(new URL('countries.json', document.baseURI)).then((r) => {
-  if (!r.ok) throw new Error(`Could not load the country list (HTTP ${r.status})`);
-  return r.json() as Promise<Country[]>;
-}).catch((e) => { countries = null; throw e; }));
 
 function WhoSelect({ value, onChange, label = 'For' }: { value: string; onChange(v: string): void; label?: string }) {
   const players = useEd((s) => s.players);

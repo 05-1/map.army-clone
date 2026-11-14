@@ -19,7 +19,9 @@ import { attributionText } from '../lib/exportmap';
 import { TurnSlider, turnLabel } from '../lib/TurnSlider';
 import type { BasemapId, Feature, PlayerAllocation, Pos, TechItem, Zone } from '../lib/types';
 import '../styles.css';
-import { announceDraft, closeChannel, fetchHistory, fetchState, join, openChannel, sb, setReady, type JoinResult } from './client';
+import { announceDraft, closeChannel, fetchHistory, fetchState, fetchTerrain, join, openChannel, sb, setReady, type JoinResult } from './client';
+import { setTerrain } from '../lib/terrainLayer';
+import { TerrainLegend } from '../lib/TerrainLegend';
 import { PlayController } from './controller';
 import { effective, pointsLeft, remaining, usePlay, type PTool } from './store';
 
@@ -58,6 +60,17 @@ function Game({ token }: { token: string }) {
   const [basemap, setBase] = useState<BasemapId>('satellite');
   const [treeOpen, setTreeOpen] = useState(false);
   const [panelOpen, setPanelOpen] = useState(true);
+  const [terrainOn, setTerrainOn] = useState(false);
+  const [terrainEmpty, setTerrainEmpty] = useState(false);
+  useEffect(() => {
+    const m = mapRef.current;
+    if (!m || !playerId) return;
+    if (!terrainOn) return void setTerrain(m, null);
+    fetchTerrain(playerId).then((fc) => {
+      if (fc) setTerrain(m, fc);
+      setTerrainEmpty(!fc?.features.length);
+    }, (e) => usePlay.getState().say((e as Error).message));
+  }, [terrainOn, playerId]);
   const [exporting, setExporting] = useState(false);
   const measureRef = useRef<Measure | null>(null);
   const [measured, setMeasured] = useState<MeasureState>(MEASURE_IDLE);
@@ -220,6 +233,7 @@ function Game({ token }: { token: string }) {
             <span className="grow" />
             <button type="button" className={`btn sm${tool === 'measure' ? ' on' : ''}`} aria-pressed={tool === 'measure'} onClick={() => usePlay.getState().setTool(tool === 'measure' ? 'select' : 'measure')}>Measure</button>
             <button type="button" className="btn sm" onClick={() => setExporting(true)}>Export</button>
+            <button type="button" className={`btn sm${terrainOn ? ' on' : ''}`} aria-pressed={terrainOn} onClick={() => setTerrainOn(!terrainOn)}>Terrain</button>
             <div className="seg compact" role="group" aria-label="Basemap">
               {BASEMAP_IDS.map((id) => (
                 <button key={id} type="button" className={basemap === id ? 'on' : ''} onClick={() => (setBase(id), mapRef.current && setBasemap(mapRef.current, id))}>
@@ -239,6 +253,7 @@ function Game({ token }: { token: string }) {
                 <Tools />
                 <DraftList />
                 <LastTurn />
+                <CombatReportBox />
               </aside>
             ) : (
               <button type="button" className="btn panelshow" onClick={() => setPanelOpen(true)}>Orders ▴</button>
@@ -247,6 +262,7 @@ function Game({ token }: { token: string }) {
           <Details />
           {treeOpen && <TechModal onClose={() => setTreeOpen(false)} />}
           {tool === 'measure' && <div className="measurebox right"><MeasurePanel m={measureRef.current} s={measured} onClose={() => usePlay.getState().setTool('select')} /></div>}
+          {terrainOn && <TerrainLegend empty={terrainEmpty} />}
           {exporting && (
             <ExportDialog
               map={mapRef.current} title={`${state.map.name} · ${state.player.name}`} attribution={attributionText(BASEMAPS[basemap].attribution)}
@@ -621,6 +637,8 @@ function Details() {
           {isPoint && <div><dt>Position</dt><dd>{fmtLatLon(f.geometry.coordinates as Pos)}</dd></div>}
         </dl>
       )}
+      {!isNew && st.state?.combat?.own[sel] && <OwnCombat fid={sel} editable={mine} />}
+      {!isNew && !e.mine && !st.viewing && st.state?.combat && <OtherCombat fid={sel} />}
       {!isNew && p.notes && <p className="notes">{p.notes}</p>}
 
       {mine && (
@@ -632,6 +650,105 @@ function Details() {
       {!e.mine && !st.viewing && <p className="tip">Not assigned to you.</p>}
       {removing && <p className="tip">Your draft asks the owner to remove it.</p>}
     </aside>
+  );
+}
+
+/** Own unit: exact strength and experience, weapons with their targets this turn, retreat when engaged. */
+function OwnCombat({ fid, editable }: { fid: string; editable: boolean }) {
+  const c = usePlay((s) => s.state!.combat.own[fid]);
+  const features = usePlay((s) => s.state!.features);
+  const draft = usePlay((s) => s.draft);
+  const targeting = usePlay((s) => s.targeting);
+  const st = usePlay.getState();
+  const change = draft.find((x) => x.feature_id === fid);
+  const attacks = change?.op === 'update' ? change.payload.attacks ?? [] : [];
+  const retreat = change?.op === 'update' && !!change.payload.retreat;
+  const ratio = c.max ? c.strength / c.max : 0;
+  const nameOf = (id: string) => features.find((f) => f.id === id)?.props.name || 'enemy unit';
+  const setAttacks = (next: { slot: number; target: string }[]) => {
+    if (next.length || change?.op === 'update') st.put({ op: 'update', feature_id: fid, payload: { attacks: next } });
+  };
+  if (c.category !== 'ground') return <p className="tip">{c.template}: {c.category} units take no part in ground combat yet.</p>;
+  return (
+    <div className="combat">
+      <dl>
+        <div><dt>Strength</dt><dd>{Math.round(c.strength)} / {c.max}</dd></div>
+      </dl>
+      <div className={`cbar${ratio < 0.3 ? ' low' : ratio < 0.6 ? ' mid' : ''}`}><i style={{ width: `${Math.round(ratio * 100)}%` }} /></div>
+      <dl>
+        <div><dt>Type</dt><dd>{c.template}</dd></div>
+        <div><dt>Experience</dt><dd>{c.experience} encounter{c.experience === 1 ? '' : 's'}</dd></div>
+        <div><dt>Stationary</dt><dd>{c.stationary_turns} turn{c.stationary_turns === 1 ? '' : 's'}{c.stationary_turns >= 1 ? ' (dug in if it stays put)' : ''}</dd></div>
+        {c.engaged && <div><dt>Status</dt><dd>In combat</dd></div>}
+      </dl>
+      {c.weapons.length > 0 && <h4>Weapons this turn</h4>}
+      <ul className="allocs">
+        {c.weapons.map((w) => {
+          const a = attacks.find((x) => x.slot === w.slot);
+          const picking = targeting?.fid === fid && targeting.slot === w.slot;
+          return (
+            <li key={w.slot}>
+              <div className="row2 wrap">
+                <span><strong>{w.name}</strong> <small>· {w.range_m >= 1000 ? `${+(w.range_m / 1000).toFixed(1)} km` : `${w.range_m} m`}{w.indirect ? ' · indirect (unit must stay put)' : ''}</small><br />
+                  <small>{a ? `Target: ${nameOf(a.target)}` : w.indirect ? 'No target' : 'No target: returns fire if attacked'}</small></span>
+                {editable && (
+                  <>
+                    <button type="button" className={`btn sm${picking ? ' on' : ''}`} onClick={() => usePlay.setState({ targeting: picking ? null : { fid, slot: w.slot } })}>{picking ? 'Click a target…' : a ? 'Change' : 'Pick target'}</button>
+                    {a && <button type="button" className="btn sm" onClick={() => setAttacks(attacks.filter((x) => x.slot !== w.slot))}>Clear</button>}
+                  </>
+                )}
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+      {editable && c.engaged && (
+        <label className="check">
+          <input type="checkbox" checked={retreat} onChange={(e) => st.put({ op: 'update', feature_id: fid, payload: { retreat: e.target.checked } })} />
+          Retreat: leave the fight this turn (takes one parting round of fire), then it may move
+        </label>
+      )}
+      {targeting?.fid === fid && <p className="tip">Click an enemy unit on the map. Range is checked after everyone has moved.</p>}
+    </div>
+  );
+}
+
+/** Another player's unit: an estimate band if it is within intel range of one of yours, else nothing. */
+function OtherCombat({ fid }: { fid: string }) {
+  const seen = usePlay((s) => s.state!.combat.seen[fid]);
+  const km = usePlay((s) => s.state!.combat.intel_km);
+  if (!seen) return <p className="tip">No intel: none of your units is within {km} km.</p>;
+  if (!seen.ground) return null;
+  return <p>Estimated condition: <span className={`band ${seen.band.replace(' ', '-')}`}>{seen.band}</span></p>;
+}
+
+/** What combat did to this player's units at the last push, and what they know of the other side. */
+function CombatReportBox() {
+  const r = usePlay((s) => s.state!.combat?.report);
+  if (!r || (!r.own.length && !r.engagements.length)) return null;
+  return (
+    <section className="section">
+      <header><h3>Combat report, turn {r.turn}</h3></header>
+      <ul className="changes">
+        {r.own.map((u) => (
+          <li key={u.id}>
+            <div className="row">
+              <span>
+                <strong>{u.name}</strong>{' '}
+                {u.destroyed ? <span className="tag bad">destroyed</span> : <small>{Math.round(u.before)} → {Math.round(u.after)} / {u.max}</small>}
+                {u.recovered > 0 && <small> · recovered {Math.round(u.recovered)}</small>}
+              </span>
+            </div>
+          </li>
+        ))}
+      </ul>
+      {r.engagements.map((e) => (
+        <p key={e.id} className="tip">
+          {e.new ? 'New fight' : 'Fight'}: {e.own.join(', ')} against {e.others.map((o) => `${o.name}${o.band ? ` (${o.band})` : ''}`).join(', ') || 'unknown units'}
+          {e.status === 'ended' ? ` · ended (${e.end_reason})` : ` · ${e.rounds} round${e.rounds === 1 ? '' : 's'}, continues`}
+        </p>
+      ))}
+    </section>
   );
 }
 

@@ -5,7 +5,7 @@
 import type { Map as MlMap, MapMouseEvent } from 'maplibre-gl';
 import { toMerc, translateGeom } from '../lib/geo';
 import { hitLayers, SceneRenderer } from '../lib/scene';
-import { baseId, effectiveChanges, findConflicts, ghostFeatures, GHOST_LAYER, GHOST_LAYERS, putChange, zoneParts } from '../lib/submissions';
+import { baseId, effectiveChanges, findConflicts, ghostFeatures, GHOST_LAYER, GHOST_LAYERS, putChange, zoneParts, anchorOf } from '../lib/submissions';
 import { DEFAULT_STYLE, type Asset, type Change, type Feature, type Pos } from '../lib/types';
 import { useEd } from './store';
 
@@ -63,6 +63,25 @@ export class ReviewOverlay {
     const accepted = b.drafts.map((d) => ({ player_id: d.player_id, changes: effectiveChanges(d) }));
     for (const d of accepted) {
       for (const f of ghostFeatures(d.changes, s.features, colorOf(d.player_id))) out.push({ ...f, z: out.length });
+    }
+    // Declared attacks: an arrow from each attacker's final position to its target.
+    const finalPos = (fid: string): Pos | null => {
+      for (const d of accepted) {
+        const c = d.changes.find((x) => x.feature_id === fid);
+        if (c?.op === 'update' && c.payload.geometry) return anchorOf(c.payload.geometry);
+      }
+      const f = s.features.find((x) => x.id === fid);
+      return f ? anchorOf(f.geometry) : null;
+    };
+    for (const d of accepted) {
+      for (const c of d.changes) {
+        if (c.op !== 'update' || !c.payload.attacks?.length) continue;
+        const from = finalPos(c.feature_id);
+        for (const a of c.payload.attacks) {
+          const to = finalPos(a.target);
+          if (from && to) extra(`atk~${c.feature_id}~${a.slot}`, 'arrow', { type: 'LineString', coordinates: [from, to] }, {}, { color: '#ff453a', width: 2, dash: 'dash' });
+        }
+      }
     }
     for (const c of findConflicts(s.features, accepted, b.turn.conflict_m)) {
       extra(`conflict~${c.a}~${c.b}`, 'circle', { type: 'Point', coordinates: c.at }, { radius: Math.max(b.turn.conflict_m! / 2, c.distance / 2) }, { color: '#ff453a', width: 2.5, dash: 'dot', fillOpacity: 0.12 });

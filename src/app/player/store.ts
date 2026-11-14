@@ -23,6 +23,8 @@ interface Play {
   buyId: string | null;
   /** Points of the arrow, line or area being drawn (0 = not drawing). */
   drawing: number;
+  /** Picking a target on the map for one weapon of one of the player's units. */
+  targeting: { fid: string; slot: number } | null;
   sel: string | null;
   hint: string;
   /** A past turn shown read-only in place of the live map. */
@@ -69,6 +71,7 @@ export const usePlay = create<Play>()((set, get) => {
     allocId: null,
     buyId: null,
     drawing: 0,
+    targeting: null,
     sel: null,
     hint: '',
     viewing: null,
@@ -149,7 +152,7 @@ export const usePlay = create<Play>()((set, get) => {
       }
     },
     // Any tool but select closes the details box, which would otherwise sit over the map (on a phone above all).
-    setTool: (tool, allocId = null) => set({ tool, allocId, buyId: null, hint: '', ...(tool !== 'select' ? { sel: null } : {}) }),
+    setTool: (tool, allocId = null) => set({ tool, allocId, buyId: null, hint: '', targeting: null, ...(tool !== 'select' ? { sel: null } : {}) }),
     startBuy: (buyId) => set({ tool: 'buy', buyId, allocId: null, hint: '', sel: null }),
     say(hint) {
       set({ hint });

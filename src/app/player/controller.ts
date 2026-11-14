@@ -32,6 +32,8 @@ const overlayLayers = (color: string) => [
   { id: 'po-zone', type: 'line', source: OVERLAY, filter: ['==', ['get', 'o'], 'zone'], paint: { 'line-color': color, 'line-width': 2, 'line-dasharray': [3, 2] } },
   { id: 'po-range', type: 'line', source: OVERLAY, filter: ['==', ['get', 'o'], 'range'], paint: { 'line-color': color, 'line-width': 1, 'line-opacity': 0.45, 'line-dasharray': [2, 3] } },
   { id: 'po-range-sel', type: 'line', source: OVERLAY, filter: ['==', ['get', 'o'], 'range-sel'], paint: { 'line-color': '#35c7f0', 'line-width': 2, 'line-dasharray': [3, 2] } },
+  { id: 'po-eng', type: 'line', source: OVERLAY, filter: ['==', ['get', 'o'], 'eng'], paint: { 'line-color': '#ff9f0a', 'line-width': 3, 'line-opacity': 0.7 } },
+  { id: 'po-atk', type: 'line', source: OVERLAY, filter: ['==', ['get', 'o'], 'atk'], paint: { 'line-color': '#ff453a', 'line-width': 2, 'line-dasharray': [2, 1.5] } },
   { id: 'po-vert', type: 'circle', source: OVERLAY, filter: ['==', ['get', 'o'], 'v'],
     paint: { 'circle-radius': 4, 'circle-color': '#ffffff', 'circle-stroke-color': '#0d1014', 'circle-stroke-width': 1.5 } },
 ] as unknown as LayerSpecification[];
@@ -69,6 +71,7 @@ export class PlayController {
         this.cursor = null;
         map.getCanvas().style.cursor = s.tool === 'select' ? '' : 'crosshair';
       }
+      if (s.targeting !== p.targeting) map.getCanvas().style.cursor = s.targeting ? 'crosshair' : '';
       if (s.state !== p.state || s.draft !== p.draft || s.sel !== p.sel || s.tool !== p.tool || s.allocId !== p.allocId || s.buyId !== p.buyId || s.viewing !== p.viewing) this.draw();
     });
     this.draw();
@@ -115,6 +118,30 @@ export class PlayController {
       if (buyItem && buyItem.placement !== 'anywhere') {
         if (buyItem.placement !== 'spawn') for (const z of state.spawn_zones) add(zoneGeometry(z.zone), 'zone');
         if (buyItem.placement !== 'zone') for (const sp of sourcesFor(buyItem, state.spawn_points)) add(circlePoly(sp.center, sp.radius_m), 'zone');
+      }
+    }
+    if (!viewing) {
+      // My declared attacks this turn, and the fights my units are in.
+      const at = (fid: string): Pos | null => {
+        const c = draft.find((x) => x.feature_id === fid);
+        if (c?.op === 'update' && c.payload.geometry) return anchorOf(c.payload.geometry);
+        const f = state.features.find((x) => x.id === fid);
+        return f ? anchorOf(f.geometry) : null;
+      };
+      for (const c of draft) {
+        if (c.op !== 'update' || !c.payload.attacks) continue;
+        const from = at(c.feature_id);
+        for (const a of c.payload.attacks) {
+          const to = at(a.target);
+          if (from && to) add({ type: 'LineString', coordinates: [from, to] }, 'atk');
+        }
+      }
+      for (const eg of state.combat?.engagements ?? []) {
+        const ids = eg.units ?? [];
+        for (const m of ids.filter((x) => state.combat.own[x])) for (const o of ids.filter((x) => !state.combat.own[x])) {
+          const a = at(m), b = at(o);
+          if (a && b) add({ type: 'LineString', coordinates: [a, b] }, 'eng');
+        }
       }
     }
     if (e) add(e.f.geometry, e.f.geometry.type === 'Point' ? 'selpt' : 'sel');
@@ -220,6 +247,20 @@ export class PlayController {
     this.drag = { fid: id, grab: [e.lngLat.lng, e.lngLat.lat], from: anchorOf(eff.f.geometry) };
     usePlay.setState({ sel: id });
   }
+  /** Set the target of one weapon from a click on the map. Only another player's ground unit the player can see qualifies. */
+  private pickTarget(tg: { fid: string; slot: number }, id: string | null) {
+    const s = S();
+    const c = s.state?.combat;
+    usePlay.setState({ targeting: null });
+    if (!id || !c) return s.say('No unit there. Pick the target again.');
+    if (c.own[id]) return s.say('That is one of your own units.');
+    if (!s.state!.features.some((f) => f.id === id) || c.seen[id]?.ground === false) return s.say('That is not a ground unit you can attack.');
+    const cur = s.draft.find((x) => x.feature_id === tg.fid);
+    const attacks = (cur?.op === 'update' ? cur.payload.attacks ?? [] : []).filter((a) => a.slot !== tg.slot);
+    s.put({ op: 'update', feature_id: tg.fid, payload: { attacks: [...attacks, { slot: tg.slot, target: id }].sort((a, b) => a.slot - b.slot) } });
+    usePlay.setState({ sel: tg.fid });
+  }
+
   /** Buttons for touch screens, where there is no Enter key and double-tap is unreliable. */
   private onDrawCmd = (e: Event) => {
     const cmd = (e as CustomEvent<'finish' | 'undo' | 'cancel'>).detail;
@@ -247,6 +288,12 @@ export class PlayController {
       if (bought) return canPlace(bought, want, s.state.spawn_zones, s.state.spawn_points) ? want : null;
       const zone = s.state.allocations.find((a) => a.id === c.payload.allocation_id)?.zone ?? null;
       return inZone(zone, want) ? want : null;
+    }
+    // A unit in a fight only moves when ordered to retreat.
+    if (s.state.combat?.own[fid]?.engaged && !(eff.change?.op === 'update' && eff.change.payload.retreat)) {
+      if (!this.warned) s.say('This unit is engaged in combat. Tick "Retreat" in its details to move it.');
+      this.warned = true;
+      return null;
     }
     return clampToRadius(anchorOf(eff.live!.geometry), want, s.state.radii[fid]);
   }
@@ -279,14 +326,18 @@ export class PlayController {
     }
   };
 
+  private warned = false;
   private onUp = () => {
     this.drag = null;
+    this.warned = false;
   };
 
   private onClick = (e: MapMouseEvent) => {
     const tool = S().tool;
     const at: Pos = [e.lngLat.lng, e.lngLat.lat];
     if (tool === 'measure') return; // the measuring tool takes the clicks
+    const tg = S().targeting;
+    if (tg) return this.pickTarget(tg, this.hit(e.point, 12));
     if (tool === 'select') return usePlay.setState({ sel: this.hit(e.point, 10) });
     if (!S().editable()) return void S().put({ op: 'delete', feature_id: '' }); // explains why not
     if (!DRAW.includes(tool)) return this.place(tool, at);

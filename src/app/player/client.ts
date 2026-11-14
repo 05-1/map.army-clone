@@ -70,6 +70,11 @@ export async function saveDraft(playerId: string, changes: Change[]): Promise<{ 
   return must(await sb!.rpc('save_draft', { p_player_id: playerId, p_changes: changes })) as { updated_at: string };
 }
 
+/** Urban and forest zones of the map (common knowledge for every player). */
+export async function fetchTerrain(playerId: string): Promise<import('geojson').FeatureCollection | null> {
+  return must(await sb!.rpc('get_player_terrain', { p_player_id: playerId })) as import('geojson').FeatureCollection | null;
+}
+
 export async function setReady(playerId: string, ready: boolean): Promise<void> {
   must(await sb!.rpc('set_ready', { p_player_id: playerId, p_ready: ready }));
 }

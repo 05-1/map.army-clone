@@ -3,6 +3,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { PGlite } from '@electric-sql/pglite';
+import { postgis } from '@electric-sql/pglite-postgis';
 import { expect, it } from 'vitest';
 
 const OWNER = '00000000-0000-4000-8000-00000000000a';
@@ -10,7 +11,7 @@ const ANON = '00000000-0000-4000-8000-0000000000a1';
 const read = (f: string) => readFileSync(resolve(__dirname, f), 'utf8');
 
 it('upgrades the previous schema in place', async () => {
-  const db = new PGlite();
+  const db = new PGlite({ extensions: { postgis } });
   const as = async (uid: string, anon: boolean, sql: string, params: unknown[] = []) => {
     await db.query(`select set_config('request.jwt.claim.sub', $1, false)`, [uid]);
     await db.query(`select set_config('request.jwt.claims', $1, false)`, [JSON.stringify({ sub: uid, is_anonymous: anon })]);

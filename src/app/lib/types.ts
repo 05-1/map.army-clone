@@ -35,6 +35,8 @@ export interface Props {
   fontSize?: number;
   /** Tech item this unit is (bought from the tree, or tagged by the owner): pays income, may be a spawn point. */
   tech?: string;
+  /** Unit template (combat stats). Absent = from the tech item, or matched by graphic / symbol. */
+  unit?: string;
 }
 
 export interface Feature {
@@ -157,6 +159,10 @@ export interface UpdatePayload {
   heading?: number;
   /** Text order; appended to the unit's notes when the turn is pushed. */
   order?: string;
+  /** Targets per weapon slot this turn. */
+  attacks?: { slot: number; target: string }[];
+  /** Leave the engagement this unit is in (takes one parting round, then may move). */
+  retreat?: boolean;
 }
 
 export type Change =
@@ -255,6 +261,8 @@ export interface TechItem {
   move_range_m: number | null;
   /** Players do not see it, and cannot research it, before this turn. Null = from the start. */
   release_turn: number | null;
+  /** Combat stats for units bought from it. */
+  template_id: string | null;
   /** Place in the flowchart; null = laid out by tier. */
   pos_x: number | null;
   pos_y: number | null;
@@ -331,6 +339,7 @@ export interface PlayerState {
   spawn_zones: Pick<SpawnZone, 'id' | 'name' | 'zone'>[];
   /** This player's own units that are spawn points, where they stand now. */
   spawn_points: { feature_id: string; center: Pos; radius_m: number; name: string; item_id: string }[];
+  combat: PlayerCombat;
   /** Outcome of the most recent pushed turn. */
   last: { number: number; applied: boolean; changes: Change[]; edited: boolean; rejected: string[]; owner_note: string | null } | null;
 }
@@ -342,4 +351,85 @@ export interface SnapshotPayload {
   features: Feature[];
   assets: Asset[];
   viewing: number;
+}
+
+// ---------------------------------------------------------------------------
+// Ground combat
+// ---------------------------------------------------------------------------
+
+export interface WeaponProfile {
+  id: string;
+  name: string;
+  attacks: number;
+  ap: number;
+  range_m: number;
+  indirect: boolean;
+  deleted_at: string | null;
+}
+
+export interface UnitTemplate {
+  id: string;
+  name: string;
+  max_strength: number;
+  armor: number;
+  category: 'ground' | 'air' | 'naval';
+  asset_id: string | null;
+  sidc: string | null;
+  weapon_ids: string[];
+  deleted_at: string | null;
+}
+
+export interface UnitLive {
+  template: string;
+  strength: number | null;
+  experience: number | null;
+  stationary_turns: number | null;
+  engaged: boolean;
+}
+
+export interface Engagement {
+  id: string;
+  status: 'active' | 'ended';
+  start_turn: number;
+  turns_engaged: number;
+  units: { fid: string; side: string }[];
+}
+
+export interface TerrainStats {
+  zones: number;
+  total_km2?: number;
+  urban_pct?: number;
+  forest_pct?: number;
+  open_pct?: number;
+  source?: string | null;
+  generated_at?: string | null;
+}
+
+/** What get_combat_admin() returns. Settings are typed in lib/combat.ts. */
+export interface CombatAdmin {
+  turn: number;
+  defaults: Record<string, unknown>;
+  settings: import('./combat').CombatSettings;
+  versions: { from_turn: number; settings: Record<string, unknown>; updated_at: string }[];
+  weapons: WeaponProfile[];
+  templates: UnitTemplate[];
+  units: Record<string, UnitLive>;
+  engagements: Engagement[];
+  terrain: TerrainStats;
+}
+
+/** A player's view of combat: exact for own units, a band for others within intel range. */
+export interface PlayerCombat {
+  intel_km: number;
+  own: Record<string, { template: string; category: string; max: number; strength: number; experience: number; stationary_turns: number; engaged: boolean;
+    weapons: { slot: number; name: string; range_m: number; indirect: boolean }[] }>;
+  seen: Record<string, { band: string; ground: boolean }>;
+  engagements: { id: string; turns: number; units: string[] | null }[];
+  report: CombatReport | null;
+}
+
+export interface CombatReport {
+  turn: number;
+  own: { id: string; name: string; max: number; before: number; after: number; destroyed: boolean; fired: boolean; hit: boolean; recovered: number }[];
+  engagements: { id: string; status: string; new: boolean; end_reason: string | null; rounds: number; own: string[]; others: { name: string; band: string | null }[] }[];
 }

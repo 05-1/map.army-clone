@@ -20,7 +20,8 @@ begin
   for r in select policyname, tablename from pg_policies
             where schemaname = 'public' and tablename = any (array['maps','layers','features','assets','share_links','players',
               'turns','turn_move_rules','allocations','drafts','snapshots','activity','app_meta','submissions','submission_changes',
-              'tech_items','spawn_zones']) loop
+              'tech_items','spawn_zones','weapon_profiles','unit_templates','unit_state','engagements','combat_settings',
+              'combat_previews','combat_reports','terrain_zones','terrain_meta']) loop
     execute format('drop policy %I on public.%I', r.policyname, r.tablename);
   end loop;
   -- Everything in `private` is ours. Cascade also removes the triggers and column defaults that use them; both are re-created below.
@@ -40,6 +41,8 @@ begin
               'claim_invite','get_player_state','get_player_history','save_draft','set_ready',
               'get_economy','save_tech_item','delete_tech_item','save_spawn_zone','delete_spawn_zone','set_player_points','set_player_tech',
               'move_tech_items',
+              'get_combat_admin','save_weapon','save_unit_template','save_combat_settings','set_unit_state','end_engagement',
+              'get_combat_inputs','save_combat_preview','get_combat_preview','replace_terrain','get_terrain','get_player_terrain','get_shared_terrain',
               'submit_turn','withdraw_submission','review_submission']) loop
     execute 'drop function ' || r.sig || ' cascade';
   end loop;
@@ -319,6 +322,113 @@ create table if not exists public.spawn_zones (
 );
 create index if not exists spawn_zones_map_idx on public.spawn_zones (map_id);
 
+-- ---------------------------------------------------------------------------
+-- Ground combat (schema 8). PostGIS holds the terrain zones; Supabase keeps extensions in their own schema.
+-- ---------------------------------------------------------------------------
+create schema if not exists extensions;
+create extension if not exists postgis with schema extensions;
+
+-- What a unit fires. A template lists the weapons its units carry (the same profile may appear twice).
+create table if not exists public.weapon_profiles (
+  id         uuid primary key default gen_random_uuid(),
+  map_id     uuid not null references public.maps (id) on delete cascade,
+  name       text not null check (char_length(name) between 1 and 80),
+  attacks    double precision not null default 100 check (attacks between 0 and 1000000),
+  ap         double precision not null default 10 check (ap between 0 and 1000000),
+  range_m    double precision not null default 3000 check (range_m between 0 and 20000000),
+  indirect   boolean not null default false,
+  deleted_at timestamptz,
+  created_at timestamptz not null default now()
+);
+create index if not exists weapon_profiles_map_idx on public.weapon_profiles (map_id);
+
+create table if not exists public.unit_templates (
+  id           uuid primary key default gen_random_uuid(),
+  map_id       uuid not null references public.maps (id) on delete cascade,
+  name         text not null check (char_length(name) between 1 and 80),
+  max_strength double precision not null default 1000 check (max_strength > 0 and max_strength <= 1000000000),
+  armor        double precision not null default 0 check (armor between 0 and 1000000),
+  category     text not null default 'ground' check (category in ('ground', 'air', 'naval')),
+  asset_id     uuid references public.assets (id),                              -- units drawn with this graphic ...
+  sidc         text check (sidc is null or sidc ~ '^[A-Za-z0-9*-]{10,30}$'),    -- ... or this symbol use the template
+  weapon_ids   uuid[] not null default '{}',
+  deleted_at   timestamptz,
+  created_at   timestamptz not null default now()
+);
+create index if not exists unit_templates_map_idx on public.unit_templates (map_id);
+
+-- Live state of each unit that has a template. A unit with no row yet is at full strength.
+create table if not exists public.unit_state (
+  feature_id       uuid primary key references public.features (id) on delete cascade,
+  map_id           uuid not null references public.maps (id) on delete cascade,
+  strength         double precision not null check (strength >= 0),
+  experience       integer not null default 0 check (experience >= 0),
+  stationary_turns integer not null default 0 check (stationary_turns >= 0),
+  updated_at       timestamptz not null default now()
+);
+create index if not exists unit_state_map_idx on public.unit_state (map_id);
+
+-- A fight between units: units is [{"fid": ..., "side": ...}]. Active ones carry on every push until they end.
+create table if not exists public.engagements (
+  id            uuid primary key default gen_random_uuid(),
+  map_id        uuid not null references public.maps (id) on delete cascade,
+  status        text not null default 'active' check (status in ('active', 'ended')),
+  start_turn    integer not null,
+  turns_engaged integer not null default 1,
+  ended_turn    integer,
+  end_reason    text,
+  units         jsonb not null default '[]',
+  updated_at    timestamptz not null default now()
+);
+create index if not exists engagements_map_idx on public.engagements (map_id, status);
+
+-- Every combat number, versioned: a turn uses the newest row with from_turn <= its number.
+create table if not exists public.combat_settings (
+  map_id     uuid not null references public.maps (id) on delete cascade,
+  from_turn  integer not null check (from_turn >= 1),
+  settings   jsonb not null check (octet_length(settings::text) < 20000),
+  updated_at timestamptz not null default now(),
+  primary key (map_id, from_turn)
+);
+
+-- The owner's reviewed combat result for a turn. Push applies it exactly, if its inputs are unchanged.
+create table if not exists public.combat_previews (
+  turn_id    uuid primary key references public.turns (id) on delete cascade,
+  signature  text not null,
+  data       jsonb not null default '{}',   -- salts and hand edits, to recompute the same result
+  result     jsonb not null,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists public.combat_reports (
+  map_id      uuid not null references public.maps (id) on delete cascade,
+  turn_number integer not null,
+  player_id   uuid not null references public.players (id) on delete cascade,
+  report      jsonb not null,
+  primary key (player_id, turn_number)
+);
+
+create table if not exists public.terrain_zones (
+  id         uuid primary key default gen_random_uuid(),
+  map_id     uuid not null references public.maps (id) on delete cascade,
+  type       text not null check (type in ('urban', 'forest')),
+  geom       extensions.geometry(MultiPolygon, 4326) not null,
+  area_km2   double precision not null default 0,
+  created_at timestamptz not null default now()
+);
+create index if not exists terrain_zones_map_idx on public.terrain_zones (map_id);
+create index if not exists terrain_zones_geom_idx on public.terrain_zones using gist (geom);
+
+create table if not exists public.terrain_meta (
+  map_id       uuid primary key references public.maps (id) on delete cascade,
+  area         extensions.geometry(MultiPolygon, 4326),
+  source       text,
+  options      jsonb not null default '{}',
+  generated_at timestamptz not null default now()
+);
+
+alter table public.tech_items add column if not exists template_id uuid;   -- units bought from it get this template
+
 alter table public.players
   add column if not exists spawn_points    integer not null default 0,
   add column if not exists research_points integer not null default 0,
@@ -471,7 +581,13 @@ as $$
     -- Points and research per player, so a rollback puts them back too. Never sent to players or viewers.
     'economy', coalesce((select jsonb_object_agg(p.id, jsonb_build_object('spawn_points', p.spawn_points,
                             'research_points', p.research_points, 'tech_unlocked', to_jsonb(p.tech_unlocked)))
-                          from public.players p where p.map_id = p_map_id), '{}'::jsonb)
+                          from public.players p where p.map_id = p_map_id), '{}'::jsonb),
+    -- Unit strength, experience and engagements, so a rollback restores the fighting too. Owner only.
+    'combat', jsonb_build_object(
+      'units', coalesce((select jsonb_object_agg(u.feature_id, jsonb_build_object('strength', u.strength, 'experience', u.experience,
+                           'stationary_turns', u.stationary_turns)) from public.unit_state u where u.map_id = p_map_id), '{}'::jsonb),
+      'engagements', coalesce((select jsonb_agg(to_jsonb(e) - 'map_id' - 'updated_at') from public.engagements e
+                                where e.map_id = p_map_id and e.status = 'active'), '[]'::jsonb))
   );
 $$;
 
@@ -606,6 +722,7 @@ as $$
      and (props -> 'tint' is null or props -> 'tint' = 'null'::jsonb or private.str_ok(props -> 'tint', 7, '^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$'))
      and (props -> 'showLabel' is null or jsonb_typeof(props -> 'showLabel') = 'boolean')
      and private.str_ok(props -> 'tech', 36, '^[0-9a-f-]{36}$')
+     and private.str_ok(props -> 'unit', 36, '^[0-9a-f-]{36}$')
      and private.str_ok(style -> 'color', 7, '^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$')
      and private.str_ok(style -> 'dash', 5, '^(solid|dash|dot)$')
      and private.num_in(style -> 'width', 1, 16)
@@ -713,7 +830,7 @@ as $$
       'props', private.pick(j -> 'props', array['name', 'type', 'heading', 'speed', 'notes', 'timestamp', 'sidc',
                                                 'sizeMode', 'sizePx', 'sizeM', 'tint', 'showLabel', 'radius', 'fontSize']),
       'style', private.pick(j -> 'style', array['color', 'width', 'dash', 'fillOpacity']))
-    when 'update' then private.pick(j, array['geometry', 'heading', 'order'])
+    when 'update' then private.pick(j, array['geometry', 'heading', 'order', 'attacks', 'retreat'])
     else '{}'::jsonb
   end;
 $$;
@@ -872,8 +989,18 @@ begin
       raise exception 'object is not assigned to this player' using errcode = '42501';
     end if;
     if p_op = 'update' then
-      if j = '{}'::jsonb or exists (select 1 from jsonb_object_keys(j) key where key not in ('geometry', 'heading', 'order')) then
-        raise exception 'a draft can change position, heading and orders only' using errcode = '42501';
+      if j = '{}'::jsonb or exists (select 1 from jsonb_object_keys(j) key where key not in ('geometry', 'heading', 'order', 'attacks', 'retreat')) then
+        raise exception 'a draft can change position, heading, orders, attacks and retreat only' using errcode = '42501';
+      end if;
+      if j ? 'retreat' and jsonb_typeof(j -> 'retreat') <> 'boolean' then
+        raise exception 'invalid retreat order' using errcode = '22023';
+      end if;
+      if j ? 'attacks' then
+        perform private.check_attacks(p, f, j -> 'attacks', strict);
+      end if;
+      -- A unit in a fight stays put unless it is ordered to retreat.
+      if strict and j ? 'geometry' and not coalesce((j ->> 'retreat')::boolean, false) and private.engaged(f.id) then
+        raise exception '% is engaged in combat and can only move by retreating', coalesce(nullif(f.props ->> 'name', ''), 'this unit') using errcode = '42501';
       end if;
       if j ? 'geometry' and (not private.valid_geom(j -> 'geometry', f.geometry ->> 'type')
                              or octet_length((j -> 'geometry')::text) > 100000) then
@@ -995,7 +1122,8 @@ begin
           'asset_id', it.asset_id,
           'props', it.props || private.pick(clean -> 'props', array['name', 'heading'])
                    || case when it.sidc is not null then jsonb_build_object('sidc', it.sidc) else '{}'::jsonb end
-                   || jsonb_build_object('tech', it.id),
+                   || jsonb_build_object('tech', it.id)
+                   || case when it.template_id is not null then jsonb_build_object('unit', it.template_id) else '{}'::jsonb end,
           'style', '{}'::jsonb);
       end if;
     end if;
@@ -1090,6 +1218,19 @@ begin
     tech_unlocked = coalesce(array(select jsonb_array_elements_text(e.value -> 'tech_unlocked')::uuid), pl.tech_unlocked)
   from jsonb_each(coalesce(s -> 'economy', '{}'::jsonb)) e
   where pl.map_id = p_map_id and pl.id::text = e.key;
+  -- Snapshots from before schema 8 have no combat state: it then stays as it is.
+  if s ? 'combat' then
+    delete from public.unit_state where map_id = p_map_id;
+    insert into public.unit_state (feature_id, map_id, strength, experience, stationary_turns)
+      select f.id, p_map_id, (e.value ->> 'strength')::float8, (e.value ->> 'experience')::integer, (e.value ->> 'stationary_turns')::integer
+      from jsonb_each(s -> 'combat' -> 'units') e join public.features f on f.id::text = e.key and f.map_id = p_map_id;
+    update public.engagements set status = 'ended', end_reason = coalesce(end_reason, 'rolled back') where map_id = p_map_id and status = 'active';
+    insert into public.engagements (id, map_id, status, start_turn, turns_engaged, ended_turn, end_reason, units)
+      select (e ->> 'id')::uuid, p_map_id, 'active', (e ->> 'start_turn')::integer, (e ->> 'turns_engaged')::integer, null, null, e -> 'units'
+      from jsonb_array_elements(s -> 'combat' -> 'engagements') e
+    on conflict (id) do update set status = 'active', turns_engaged = excluded.turns_engaged, units = excluded.units,
+      ended_turn = null, end_reason = null;
+  end if;
 end $$;
 
 create function private.pin_hash(p_salt text, p_pin text) returns text
@@ -1771,8 +1912,21 @@ declare
   k text;
   next_id uuid;
   next_n integer;
+  cp public.combat_previews;
 begin
   t := private.need_turn(p_turn_id, array['locked']);
+
+  -- Combat: a reviewed result is needed whenever there are units with templates or running fights,
+  -- and it must have been computed from exactly what this push is about to apply.
+  if private.combat_needed(t) then
+    select * into cp from public.combat_previews where turn_id = t.id;
+    if not found then
+      raise exception 'combat has not been resolved for this turn: run the combat preview first' using errcode = 'P0001';
+    end if;
+    if cp.signature <> md5(private.combat_inputs(t)::text) then
+      raise exception 'something changed since the combat preview (a draft, a rejection, a unit or a setting): run it again' using errcode = 'P0001';
+    end if;
+  end if;
 
   -- Pass 1: re-check every accepted draft against the map as it is now. A draft the owner edited
   -- is held to structural checks only; an untouched one must still obey radius, zone and allocation.
@@ -1807,6 +1961,11 @@ begin
     end loop;
   end loop;
 
+  -- Combat, on the final positions: strength, experience, engagements, destroyed units, reports.
+  if cp.turn_id is not null then
+    perform private.apply_combat(t, cp.result);
+  end if;
+
   -- Income: every unit on the map that carries a tech item pays its owner, after this turn's moves,
   -- purchases and losses. Revoked seats earn nothing.
   update public.players x set
@@ -1820,7 +1979,8 @@ begin
 
   update public.turns set status = 'pushed', pushed_at = now() where id = t.id;
   insert into public.snapshots (map_id, turn_number, label, payload)
-  values (t.map_id, t.number, case when t.rollback_of is not null then 'Rolled back from turn ' || t.rollback_of end, private.snapshot_now(t.map_id));
+  values (t.map_id, t.number, case when t.rollback_of is not null then 'Rolled back from turn ' || t.rollback_of end,
+          private.snapshot_now(t.map_id) || case when cp.turn_id is not null then jsonb_build_object('combat_log', cp.result -> 'log', 'combat_data', cp.data) else '{}'::jsonb end);
 
   -- Next turn: same settings, same length, same per-unit rules.
   next_n := t.number + 1;
@@ -1896,7 +2056,7 @@ begin
   end if;
   insert into public.tech_items (id, map_id, name, description, tier, sort, research_cost, spawn_cost, prereqs, buyable,
                                  asset_id, sidc, props, income_spawn, income_research, spawn_radius_m, placement, pos_x, pos_y,
-                                 category, can_move, spawn_from, move_range_m, release_turn)
+                                 category, can_move, spawn_from, move_range_m, release_turn, template_id)
   values (tid, p_map_id, trim(p ->> 'name'), nullif(trim(p ->> 'description'), ''), coalesce((p ->> 'tier')::integer, 1),
           coalesce((p ->> 'sort')::integer, 0), coalesce((p ->> 'research_cost')::integer, 0), coalesce((p ->> 'spawn_cost')::integer, 0),
           pre, coalesce((p ->> 'buyable')::boolean, true), asset, case when asset is null then nullif(p ->> 'sidc', '') end, props,
@@ -1904,14 +2064,15 @@ begin
           nullif((p ->> 'spawn_radius_m')::float8, 0), coalesce(p ->> 'placement', 'either'),
           (p ->> 'pos_x')::float8, (p ->> 'pos_y')::float8,
           coalesce(p ->> 'category', 'unit'), coalesce((p ->> 'can_move')::boolean, true), sfrom, (p ->> 'move_range_m')::float8,
-          (p ->> 'release_turn')::integer)
+          (p ->> 'release_turn')::integer,
+          (select x.id from public.unit_templates x where x.id = nullif(p ->> 'template_id', '')::uuid and x.map_id = p_map_id))
   on conflict (id) do update set name = excluded.name, description = excluded.description, tier = excluded.tier, sort = excluded.sort,
     research_cost = excluded.research_cost, spawn_cost = excluded.spawn_cost, prereqs = excluded.prereqs, buyable = excluded.buyable,
     asset_id = excluded.asset_id, sidc = excluded.sidc, props = excluded.props, income_spawn = excluded.income_spawn,
     income_research = excluded.income_research, spawn_radius_m = excluded.spawn_radius_m, placement = excluded.placement,
     pos_x = coalesce(excluded.pos_x, public.tech_items.pos_x), pos_y = coalesce(excluded.pos_y, public.tech_items.pos_y),
     category = excluded.category, can_move = excluded.can_move, spawn_from = excluded.spawn_from, move_range_m = excluded.move_range_m,
-    release_turn = excluded.release_turn;
+    release_turn = excluded.release_turn, template_id = excluded.template_id;
   -- No loops: an item may not (indirectly) require itself.
   if exists (
     with recursive up (id) as (
@@ -2019,6 +2180,592 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------------------
+-- 7c. Ground combat
+-- The damage engine itself runs in the owner's browser (app/lib/combat.ts) on inputs built here,
+-- so the sandbox, the review preview and the tests use one implementation. The database builds the
+-- inputs (final positions after movement, terrain via PostGIS, settings for the turn), stores the
+-- reviewed result with a fingerprint of those inputs, and push applies it only if nothing changed.
+-- ---------------------------------------------------------------------------
+
+-- Every number has a default here; combat_settings rows override them per map from a given turn.
+create function private.combat_defaults() returns jsonb
+language sql immutable set search_path = ''
+as $$ select '{
+  "attacker_stationary": 1.1, "target_stationary": 0.9, "dug_in": 0.85, "dug_in_turns": 2,
+  "flank_front_deg": 60, "flank_rear_deg": 60, "flank_side": 1.15, "flank_rear": 1.3,
+  "veteran_max": 1.1, "veteran_encounters": 10, "variance": 0.2, "clamp": 1.5,
+  "rounds_max": 3, "parting_round": true, "recovery_pct": 10, "remove_destroyed": true,
+  "intel_km": 100, "band_fresh": 0.9, "band_damaged": 0.6, "band_heavy": 0.3,
+  "terrain": {"open": 1.0, "urban": 0.7, "forest": 0.8},
+  "terrain_min_km2": {"urban": 25, "forest": 50}
+}'::jsonb $$;
+
+-- Settings in force on turn n: the defaults, overlaid by the newest saved version at or before n.
+create function private.combat_settings_for(p_map_id uuid, n integer) returns jsonb
+language sql stable set search_path = ''
+as $$
+  select private.combat_defaults() || coalesce((
+    select c.settings from public.combat_settings c where c.map_id = p_map_id and c.from_turn <= coalesce(n, 1)
+    order by c.from_turn desc limit 1), '{}'::jsonb);
+$$;
+
+-- The turn settings are judged against: the open turn, else the next one.
+create function private.current_turn_number(p_map_id uuid) returns integer
+language sql stable set search_path = ''
+as $$
+  select coalesce((private.active_turn(p_map_id)).number, (select max(t.number) + 1 from public.turns t where t.map_id = p_map_id), 1);
+$$;
+
+-- A unit's template: set on the unit, else its tech item's, else the first template drawn the same way.
+create function private.template_for(p_map_id uuid, p_kind text, p_asset uuid, p_props jsonb) returns uuid
+language sql stable set search_path = ''
+as $$
+  select coalesce(
+    (select t.id from public.unit_templates t where t.id::text = p_props ->> 'unit' and t.map_id = p_map_id and t.deleted_at is null),
+    (select t.id from public.tech_items x join public.unit_templates t on t.id = x.template_id
+      where x.id::text = p_props ->> 'tech' and x.map_id = p_map_id and t.deleted_at is null),
+    (select t.id from public.unit_templates t where t.map_id = p_map_id and t.deleted_at is null and p_kind = 'asset'
+      and t.asset_id = p_asset order by t.created_at limit 1),
+    (select t.id from public.unit_templates t where t.map_id = p_map_id and t.deleted_at is null and p_kind = 'symbol'
+      and t.sidc = p_props ->> 'sidc' order by t.created_at limit 1));
+$$;
+
+create function private.engaged(p_fid uuid) returns boolean
+language sql stable set search_path = ''
+as $$ select exists (select 1 from public.engagements e where e.status = 'active' and e.units @> jsonb_build_array(jsonb_build_object('fid', p_fid))); $$;
+
+-- Terrain at a point: urban wins over forest where both cover it; elsewhere open.
+create function private.terrain_at(p_map_id uuid, pos float8[]) returns text
+language sql stable set search_path = ''
+as $$
+  select coalesce((
+    select z.type from public.terrain_zones z
+    where z.map_id = p_map_id and extensions.st_covers(z.geom, extensions.st_setsrid(extensions.st_makepoint(pos[1], pos[2]), 4326))
+    order by (z.type = 'urban') desc limit 1), 'open');
+$$;
+
+-- Declared attacks on a unit's update: [{"slot": weapon index on its template, "target": feature id}].
+-- One target per weapon; the target must be another player's (or the owner's) ground unit the player can see.
+create function private.check_attacks(p public.players, f public.features, a jsonb, strict boolean) returns void
+language plpgsql stable set search_path = ''
+as $$
+declare
+  tid uuid := private.template_for(f.map_id, f.kind, f.asset_id, f.props);
+  tpl public.unit_templates;
+  e jsonb;
+  slots integer[] := '{}';
+  slot integer;
+  tgt public.features;
+  ttpl uuid;
+begin
+  if jsonb_typeof(a) <> 'array' or jsonb_array_length(a) > 20 then
+    raise exception 'invalid attack orders' using errcode = '22023';
+  end if;
+  if jsonb_array_length(a) = 0 then return; end if;
+  select * into tpl from public.unit_templates where id = tid;
+  if not found or tpl.category <> 'ground' then
+    raise exception 'this unit cannot fight on the ground' using errcode = '42501';
+  end if;
+  for e in select * from jsonb_array_elements(a) loop
+    if jsonb_typeof(e -> 'slot') <> 'number' or nullif(e ->> 'target', '') is null then
+      raise exception 'invalid attack order' using errcode = '22023';
+    end if;
+    slot := (e ->> 'slot')::integer;
+    if slot < 0 or slot >= coalesce(array_length(tpl.weapon_ids, 1), 0) or slot = any (slots) then
+      raise exception 'each weapon takes one target' using errcode = '22023';
+    end if;
+    slots := slots || slot;
+    select * into tgt from public.features x where x.id = (e ->> 'target')::uuid and x.map_id = f.map_id;
+    if not found or tgt.id = f.id then
+      raise exception 'that target is not on the map' using errcode = '22023';
+    end if;
+    if strict and tgt.owner_player_id = p.id then
+      raise exception 'you cannot attack your own unit' using errcode = '42501';
+    end if;
+    ttpl := private.template_for(tgt.map_id, tgt.kind, tgt.asset_id, tgt.props);
+    if not exists (select 1 from public.unit_templates t where t.id = ttpl and t.category = 'ground') then
+      raise exception 'that target cannot be attacked on the ground' using errcode = '42501';
+    end if;
+    if strict and not exists (select 1 from public.layers l where l.id = tgt.layer_id and l.visible
+                                and (p.visible_layers is null or l.id = any (p.visible_layers))) then
+      raise exception 'that target is not visible to you' using errcode = '42501';
+    end if;
+  end loop;
+end $$;
+
+-- Everything the engine needs for this turn, built from the database as push would see it:
+-- units at their final positions after the accepted drafts, with template, weapons, state, terrain,
+-- declared attacks and retreats; active engagements; the turn's settings. Deterministic, so its md5
+-- is the fingerprint a preview is checked against.
+create function private.combat_inputs(t public.turns) returns jsonb
+language sql stable set search_path = ''
+as $$
+  with acc as (
+    select d.player_id, c
+    from public.drafts d join public.players pl on pl.id = d.player_id,
+         jsonb_array_elements(coalesce(d.owner_changes, d.changes)) c
+    where d.turn_id = t.id and d.ready and not pl.revoked and not ((c ->> 'feature_id')::uuid = any (d.rejected))
+  ),
+  upd as (select (c ->> 'feature_id')::uuid as fid, c -> 'payload' as pl from acc where c ->> 'op' = 'update'),
+  gone as (select (c ->> 'feature_id')::uuid as fid from acc where c ->> 'op' = 'delete'),
+  existing as (
+    select f.id, f.owner_player_id as owner, f.props, private.template_for(f.map_id, f.kind, f.asset_id, f.props) as tid,
+           private.anchor(f.geometry) as start,
+           coalesce(private.anchor(u.pl -> 'geometry'), private.anchor(f.geometry)) as pos,
+           coalesce((u.pl -> 'heading')::float8, (f.props ->> 'heading')::float8) as heading,
+           coalesce(u.pl -> 'attacks', '[]'::jsonb) as attacks, coalesce((u.pl ->> 'retreat')::boolean, false) as retreat, false as fresh
+    from public.features f left join upd u on u.fid = f.id
+    where f.map_id = t.map_id and f.kind in ('symbol', 'asset') and f.id not in (select fid from gone)
+  ),
+  created as (
+    select (a.c ->> 'feature_id')::uuid, a.player_id, a.c -> 'payload' -> 'props',
+           private.template_for(t.map_id, a.c -> 'payload' ->> 'kind', nullif(a.c -> 'payload' ->> 'asset_id', '')::uuid, a.c -> 'payload' -> 'props'),
+           private.anchor(a.c -> 'payload' -> 'geometry'), private.anchor(a.c -> 'payload' -> 'geometry'),
+           (a.c -> 'payload' -> 'props' ->> 'heading')::float8, '[]'::jsonb, false, true
+    from acc a where a.c ->> 'op' = 'create' and a.c -> 'payload' ->> 'kind' in ('symbol', 'asset')
+  ),
+  units as (
+    select x.*, tp.name as tname, tp.max_strength, tp.armor, tp.category, tp.weapon_ids
+    from (select * from existing union all select * from created) x
+    join public.unit_templates tp on tp.id = x.tid
+  )
+  select jsonb_build_object(
+    'map_id', t.map_id, 'turn', t.number,
+    'settings', private.combat_settings_for(t.map_id, t.number),
+    'units', coalesce((select jsonb_agg(jsonb_build_object(
+        'id', u.id, 'name', coalesce(nullif(u.props ->> 'name', ''), u.tname), 'owner', u.owner,
+        'side', coalesce(nullif((select pl.team from public.players pl where pl.id = u.owner), ''), u.owner::text, 'owner'),
+        'template', jsonb_build_object('id', u.tid, 'name', u.tname, 'max_strength', u.max_strength, 'armor', u.armor, 'category', u.category),
+        'weapons', coalesce((select jsonb_agg(jsonb_build_object('slot', w.n - 1, 'id', wp.id, 'name', wp.name, 'attacks', wp.attacks, 'ap', wp.ap,
+                               'range_m', wp.range_m, 'indirect', wp.indirect) order by w.n)
+                             from unnest(u.weapon_ids) with ordinality w (wid, n) join public.weapon_profiles wp on wp.id = w.wid and wp.deleted_at is null), '[]'::jsonb),
+        'start', to_jsonb(u.start), 'pos', to_jsonb(u.pos),
+        'moved', u.fresh or private.dist_m(u.start, u.pos) > 0.5,
+        'heading', u.heading,
+        'strength', coalesce(s.strength, u.max_strength), 'experience', coalesce(s.experience, 0), 'stationary_turns', coalesce(s.stationary_turns, 0),
+        'terrain', private.terrain_at(t.map_id, u.pos),
+        'new', u.fresh, 'retreat', u.retreat, 'attacks', u.attacks) order by u.id)
+      from units u left join public.unit_state s on s.feature_id = u.id), '[]'::jsonb),
+    'engagements', coalesce((select jsonb_agg(jsonb_build_object('id', e.id, 'start_turn', e.start_turn, 'turns_engaged', e.turns_engaged, 'units', e.units) order by e.id)
+      from public.engagements e where e.map_id = t.map_id and e.status = 'active'), '[]'::jsonb));
+$$;
+
+create function public.get_combat_inputs(p_turn_id uuid) returns jsonb
+language plpgsql volatile security definer set search_path = ''
+as $$
+declare t public.turns;
+begin
+  t := private.need_turn(p_turn_id, array['open', 'locked']);
+  return private.combat_inputs(t);
+end $$;
+
+-- p: {"data": {...salts and edits...}, "result": {...engine output...}}. Stored with the inputs' fingerprint.
+create function public.save_combat_preview(p_turn_id uuid, p jsonb) returns jsonb
+language plpgsql volatile security definer set search_path = ''
+as $$
+declare
+  t public.turns;
+  sig text;
+begin
+  t := private.need_turn(p_turn_id, array['open', 'locked']);
+  if jsonb_typeof(p -> 'result') <> 'object' or jsonb_typeof(p -> 'result' -> 'units') <> 'array' or jsonb_typeof(p -> 'result' -> 'engagements') <> 'array' then
+    raise exception 'invalid combat result' using errcode = '22023';
+  end if;
+  if octet_length(p::text) > 8000000 then
+    raise exception 'combat result is too large' using errcode = '22023';
+  end if;
+  sig := md5(private.combat_inputs(t)::text);
+  insert into public.combat_previews (turn_id, signature, data, result) values (t.id, sig, coalesce(p -> 'data', '{}'), p -> 'result')
+  on conflict (turn_id) do update set signature = excluded.signature, data = excluded.data, result = excluded.result, created_at = now();
+  return jsonb_build_object('signature', sig, 'saved_at', now());
+end $$;
+
+create function public.get_combat_preview(p_turn_id uuid) returns jsonb
+language plpgsql volatile security definer set search_path = ''
+as $$
+declare
+  t public.turns;
+  c public.combat_previews;
+begin
+  t := private.need_turn(p_turn_id, array['open', 'locked']);
+  select * into c from public.combat_previews where turn_id = t.id;
+  if not found then return null; end if;
+  return jsonb_build_object('data', c.data, 'result', c.result, 'created_at', c.created_at,
+                            'stale', c.signature <> md5(private.combat_inputs(t)::text));
+end $$;
+
+-- Does this map need a combat result to push? Any unit with a template (strength, recovery and
+-- stationary counts move every turn) or any engagement still running.
+create function private.combat_needed(t public.turns) returns boolean
+language sql stable set search_path = ''
+as $$ select jsonb_array_length(private.combat_inputs(t) -> 'units') > 0
+          or exists (select 1 from public.engagements e where e.map_id = t.map_id and e.status = 'active'); $$;
+
+create function private.band(ratio float8, s jsonb) returns text
+language sql immutable set search_path = ''
+as $$
+  select case
+    when ratio <= 0 then 'destroyed'
+    when ratio >= (s ->> 'band_fresh')::float8 then 'fresh'
+    when ratio >= (s ->> 'band_damaged')::float8 then 'damaged'
+    when ratio >= (s ->> 'band_heavy')::float8 then 'heavily damaged'
+    else 'critical' end;
+$$;
+
+-- Apply a reviewed result inside push_turn, after movement. Returns the combat log for the snapshot.
+create function private.apply_combat(t public.turns, res jsonb) returns void
+language plpgsql volatile set search_path = ''
+as $$
+declare
+  s jsonb := private.combat_settings_for(t.map_id, t.number);
+  u jsonb;
+  e jsonb;
+  pl public.players;
+  own jsonb;
+  engs jsonb;
+begin
+  for u in select * from jsonb_array_elements(res -> 'units') loop
+    continue when not exists (select 1 from public.features f where f.id = (u ->> 'id')::uuid and f.map_id = t.map_id);
+    if coalesce((u ->> 'destroyed')::boolean, false) and coalesce((s ->> 'remove_destroyed')::boolean, true) then
+      delete from public.features where id = (u ->> 'id')::uuid and map_id = t.map_id;
+      continue;
+    end if;
+    insert into public.unit_state (feature_id, map_id, strength, experience, stationary_turns, updated_at)
+    values ((u ->> 'id')::uuid, t.map_id, greatest(0, (u ->> 'after')::float8), (u ->> 'experience')::integer, (u ->> 'stationary_turns')::integer, now())
+    on conflict (feature_id) do update set strength = excluded.strength, experience = excluded.experience,
+      stationary_turns = excluded.stationary_turns, updated_at = now();
+  end loop;
+  for e in select * from jsonb_array_elements(res -> 'engagements') loop
+    insert into public.engagements (id, map_id, status, start_turn, turns_engaged, ended_turn, end_reason, units, updated_at)
+    values ((e ->> 'id')::uuid, t.map_id, e ->> 'status', (e ->> 'start_turn')::integer, (e ->> 'turns_engaged')::integer,
+            case when e ->> 'status' = 'ended' then t.number end, e ->> 'end_reason', coalesce(e -> 'units', '[]'), now())
+    on conflict (id) do update set status = excluded.status, turns_engaged = excluded.turns_engaged, ended_turn = excluded.ended_turn,
+      end_reason = excluded.end_reason, units = excluded.units, updated_at = now()
+    where public.engagements.map_id = t.map_id;
+  end loop;
+
+  -- One report per player: their own units in full, everyone else only as an intel band, and only
+  -- within intel range of one of their units after the turn. Nothing else about other units.
+  for pl in select * from public.players x where x.map_id = t.map_id and not x.revoked loop
+    own := coalesce((
+      select jsonb_agg(jsonb_build_object('id', x ->> 'id', 'name', x ->> 'name', 'max', x -> 'max', 'before', x -> 'before', 'after', x -> 'after',
+                                          'destroyed', x -> 'destroyed', 'fired', x -> 'fired', 'hit', x -> 'hit', 'recovered', x -> 'recovered'))
+      from jsonb_array_elements(res -> 'units') x
+      where x ->> 'owner' = pl.id::text
+        and (coalesce((x ->> 'fired')::boolean, false) or coalesce((x ->> 'hit')::boolean, false) or coalesce((x ->> 'recovered')::float8, 0) > 0)), '[]');
+    engs := '[]';
+    for e in select * from jsonb_array_elements(res -> 'engagements') loop
+      continue when not exists (select 1 from jsonb_array_elements(res -> 'units') x
+                                where x ->> 'owner' = pl.id::text and e -> 'units' @> jsonb_build_array(jsonb_build_object('fid', x ->> 'id')));
+      engs := engs || jsonb_build_array(jsonb_build_object(
+        'id', e ->> 'id', 'status', e ->> 'status', 'new', e -> 'new', 'end_reason', e ->> 'end_reason', 'rounds', e -> 'rounds',
+        'own', coalesce((select jsonb_agg(x ->> 'name') from jsonb_array_elements(res -> 'units') x
+                         where x ->> 'owner' = pl.id::text and e -> 'units' @> jsonb_build_array(jsonb_build_object('fid', x ->> 'id'))), '[]'),
+        'others', coalesce((
+          select jsonb_agg(jsonb_build_object('name', x ->> 'name', 'band',
+                   case when exists (select 1 from public.features mf
+                                     where mf.map_id = t.map_id and mf.owner_player_id = pl.id
+                                       and private.dist_m(private.anchor(mf.geometry), array[(x -> 'pos' ->> 0)::float8, (x -> 'pos' ->> 1)::float8])
+                                           <= (s ->> 'intel_km')::float8 * 1000)
+                        then private.band((x ->> 'after')::float8 / nullif((x ->> 'max')::float8, 0), s) end))
+          from jsonb_array_elements(res -> 'units') x
+          where x ->> 'owner' is distinct from pl.id::text and e -> 'units' @> jsonb_build_array(jsonb_build_object('fid', x ->> 'id'))), '[]')));
+    end loop;
+    insert into public.combat_reports (map_id, turn_number, player_id, report)
+    values (t.map_id, t.number, pl.id, jsonb_build_object('turn', t.number, 'own', own, 'engagements', engs))
+    on conflict (player_id, turn_number) do update set report = excluded.report;
+  end loop;
+end $$;
+
+-- Combat state for one player: exact for their own units, an estimate band for others within intel
+-- range of any of their units, nothing beyond. Built per request; nothing out of range is ever sent.
+create function private.player_combat(p public.players) returns jsonb
+language sql stable set search_path = ''
+as $$
+  with s as (select private.combat_settings_for(p.map_id, private.current_turn_number(p.map_id)) as v),
+  u as (
+    select f.id, f.owner_player_id, private.anchor(f.geometry) as pos, f.layer_id, tp.name, tp.category, tp.max_strength, tp.weapon_ids,
+           st.strength, st.experience, st.stationary_turns
+    from public.features f
+    join public.unit_templates tp on tp.id = private.template_for(f.map_id, f.kind, f.asset_id, f.props)
+    left join public.unit_state st on st.feature_id = f.id
+    where f.map_id = p.map_id and f.kind in ('symbol', 'asset')
+  ),
+  mine as (select * from u where u.owner_player_id = p.id),
+  seen as (
+    select u.* from u
+    where u.owner_player_id is distinct from p.id
+      and exists (select 1 from public.layers l where l.id = u.layer_id and l.visible and (p.visible_layers is null or l.id = any (p.visible_layers)))
+      and exists (select 1 from mine m where private.dist_m(m.pos, u.pos) <= (select (v ->> 'intel_km')::float8 * 1000 from s))
+  )
+  select jsonb_build_object(
+    'intel_km', (select (v ->> 'intel_km')::float8 from s),
+    'own', coalesce((select jsonb_object_agg(m.id, jsonb_build_object(
+        'template', m.name, 'category', m.category, 'max', m.max_strength, 'strength', coalesce(m.strength, m.max_strength),
+        'experience', coalesce(m.experience, 0), 'stationary_turns', coalesce(m.stationary_turns, 0), 'engaged', private.engaged(m.id),
+        -- Weapon names and ranges only: enough to pick targets, never attacks or AP.
+        'weapons', coalesce((select jsonb_agg(jsonb_build_object('slot', w.n - 1, 'name', wp.name, 'range_m', wp.range_m, 'indirect', wp.indirect) order by w.n)
+                             from unnest(m.weapon_ids) with ordinality w (wid, n) join public.weapon_profiles wp on wp.id = w.wid and wp.deleted_at is null), '[]'::jsonb)))
+      from mine m), '{}'::jsonb),
+    'seen', coalesce((select jsonb_object_agg(x.id, jsonb_build_object('band', private.band(coalesce(x.strength, x.max_strength) / x.max_strength, (select v from s)),
+                        'ground', x.category = 'ground'))
+      from seen x), '{}'::jsonb),
+    -- Own engagements, naming only units this player can see on the map.
+    'engagements', coalesce((select jsonb_agg(jsonb_build_object('id', e.id, 'turns', e.turns_engaged,
+        'units', (select jsonb_agg(x ->> 'fid') from jsonb_array_elements(e.units) x
+                   where exists (select 1 from mine m where m.id::text = x ->> 'fid') or exists (select 1 from seen v where v.id::text = x ->> 'fid'))))
+      from public.engagements e
+      where e.map_id = p.map_id and e.status = 'active'
+        and exists (select 1 from jsonb_array_elements(e.units) x join mine m on m.id::text = x ->> 'fid')), '[]'::jsonb),
+    'report', (select r.report from public.combat_reports r where r.player_id = p.id order by r.turn_number desc limit 1));
+$$;
+
+-- ---- owner: templates, weapons, settings, unit overrides ----
+
+create function public.get_combat_admin(p_map_id uuid) returns jsonb
+language plpgsql stable security definer set search_path = ''
+as $$
+declare n integer;
+begin
+  perform private.need_map(p_map_id);
+  n := private.current_turn_number(p_map_id);
+  return jsonb_build_object(
+    'turn', n,
+    'defaults', private.combat_defaults(),
+    'settings', private.combat_settings_for(p_map_id, n),
+    'versions', coalesce((select jsonb_agg(jsonb_build_object('from_turn', c.from_turn, 'settings', c.settings, 'updated_at', c.updated_at) order by c.from_turn)
+                          from public.combat_settings c where c.map_id = p_map_id), '[]'::jsonb),
+    'weapons', coalesce((select jsonb_agg(to_jsonb(w) - 'map_id' order by w.created_at) from public.weapon_profiles w where w.map_id = p_map_id), '[]'::jsonb),
+    'templates', coalesce((select jsonb_agg(to_jsonb(x) - 'map_id' order by x.created_at) from public.unit_templates x where x.map_id = p_map_id), '[]'::jsonb),
+    'units', coalesce((select jsonb_object_agg(f.id, jsonb_build_object('template', tid, 'strength', st.strength, 'experience', st.experience,
+                          'stationary_turns', st.stationary_turns, 'engaged', private.engaged(f.id)))
+                       from (select f.*, private.template_for(f.map_id, f.kind, f.asset_id, f.props) as tid from public.features f
+                             where f.map_id = p_map_id and f.kind in ('symbol', 'asset')) f
+                       left join public.unit_state st on st.feature_id = f.id where f.tid is not null), '{}'::jsonb),
+    'engagements', coalesce((select jsonb_agg(to_jsonb(e) - 'map_id' order by e.start_turn) from public.engagements e
+                             where e.map_id = p_map_id and e.status = 'active'), '[]'::jsonb),
+    'terrain', private.terrain_stats(p_map_id));
+end $$;
+
+-- p: id (to edit), name, attacks, ap, range_m, indirect, deleted (true = soft delete, false = restore).
+create function public.save_weapon(p_map_id uuid, p jsonb) returns uuid
+language plpgsql volatile security definer set search_path = ''
+as $$
+declare wid uuid := coalesce(nullif(p ->> 'id', '')::uuid, gen_random_uuid());
+begin
+  perform private.need_map(p_map_id);
+  if exists (select 1 from public.weapon_profiles w where w.id = wid and w.map_id <> p_map_id) then
+    raise exception 'weapon is on another map' using errcode = '42501';
+  end if;
+  insert into public.weapon_profiles (id, map_id, name, attacks, ap, range_m, indirect, deleted_at)
+  values (wid, p_map_id, trim(p ->> 'name'), coalesce((p ->> 'attacks')::float8, 100), coalesce((p ->> 'ap')::float8, 10),
+          coalesce((p ->> 'range_m')::float8, 3000), coalesce((p ->> 'indirect')::boolean, false),
+          case when coalesce((p ->> 'deleted')::boolean, false) then now() end)
+  on conflict (id) do update set name = excluded.name, attacks = excluded.attacks, ap = excluded.ap, range_m = excluded.range_m,
+    indirect = excluded.indirect, deleted_at = case when p ? 'deleted' then excluded.deleted_at else public.weapon_profiles.deleted_at end;
+  return wid;
+end $$;
+
+-- p: id, name, max_strength, armor, category, asset_id or sidc, weapon_ids, deleted.
+create function public.save_unit_template(p_map_id uuid, p jsonb) returns uuid
+language plpgsql volatile security definer set search_path = ''
+as $$
+declare
+  tid uuid := coalesce(nullif(p ->> 'id', '')::uuid, gen_random_uuid());
+  asset uuid := nullif(p ->> 'asset_id', '')::uuid;
+  wids uuid[] := coalesce(array(select jsonb_array_elements_text(case when jsonb_typeof(p -> 'weapon_ids') = 'array' then p -> 'weapon_ids' else '[]' end)::uuid), '{}');
+begin
+  perform private.need_map(p_map_id);
+  if exists (select 1 from public.unit_templates x where x.id = tid and x.map_id <> p_map_id) then
+    raise exception 'template is on another map' using errcode = '42501';
+  end if;
+  if cardinality(wids) > 20 or exists (select 1 from unnest(wids) w where w not in (select x.id from public.weapon_profiles x where x.map_id = p_map_id)) then
+    raise exception 'a weapon is not on this map' using errcode = '22023';
+  end if;
+  if asset is not null and not exists (select 1 from public.assets where id = asset) then
+    raise exception 'unknown graphic' using errcode = '22023';
+  end if;
+  insert into public.unit_templates (id, map_id, name, max_strength, armor, category, asset_id, sidc, weapon_ids, deleted_at)
+  values (tid, p_map_id, trim(p ->> 'name'), coalesce((p ->> 'max_strength')::float8, 1000), coalesce((p ->> 'armor')::float8, 0),
+          coalesce(p ->> 'category', 'ground'), asset, case when asset is null then nullif(p ->> 'sidc', '') end, wids,
+          case when coalesce((p ->> 'deleted')::boolean, false) then now() end)
+  on conflict (id) do update set name = excluded.name, max_strength = excluded.max_strength, armor = excluded.armor, category = excluded.category,
+    asset_id = excluded.asset_id, sidc = excluded.sidc, weapon_ids = excluded.weapon_ids,
+    deleted_at = case when p ? 'deleted' then excluded.deleted_at else public.unit_templates.deleted_at end;
+  return tid;
+end $$;
+
+-- Save the settings from the current turn on. Earlier turns keep the version they were played with.
+-- Only known keys are kept; numbers must be numbers within sane bounds.
+create function public.save_combat_settings(p_map_id uuid, p jsonb) returns integer
+language plpgsql volatile security definer set search_path = ''
+as $$
+declare
+  n integer;
+  d jsonb := private.combat_defaults();
+  clean jsonb := '{}';
+  k text;
+  v jsonb;
+begin
+  perform private.need_map(p_map_id);
+  n := private.current_turn_number(p_map_id);
+  for k, v in select * from jsonb_each(coalesce(p, '{}')) loop
+    continue when not d ? k;
+    if jsonb_typeof(d -> k) = 'object' then
+      if jsonb_typeof(v) <> 'object' or exists (select 1 from jsonb_each(v) x where not (d -> k) ? x.key or jsonb_typeof(x.value) <> 'number'
+                                                   or (x.value #>> '{}')::float8 not between 0 and 1000000) then
+        raise exception 'invalid setting %', k using errcode = '22023';
+      end if;
+      clean := clean || jsonb_build_object(k, (d -> k) || v);
+    elsif jsonb_typeof(d -> k) <> jsonb_typeof(v) or (jsonb_typeof(v) = 'number' and (v #>> '{}')::float8 not between 0 and 1000000) then
+      raise exception 'invalid setting %', k using errcode = '22023';
+    else
+      clean := clean || jsonb_build_object(k, v);
+    end if;
+  end loop;
+  insert into public.combat_settings (map_id, from_turn, settings) values (p_map_id, n, private.combat_settings_for(p_map_id, n) || clean)
+  on conflict (map_id, from_turn) do update set settings = excluded.settings, updated_at = now();
+  perform private.log(p_map_id, private.actor(), 'changed combat settings', 'from turn ' || n);
+  return n;
+end $$;
+
+-- Owner override of one unit: strength, experience, stationary_turns.
+create function public.set_unit_state(p_feature_id uuid, p jsonb) returns void
+language plpgsql volatile security definer set search_path = ''
+as $$
+declare
+  f public.features;
+  tp public.unit_templates;
+begin
+  perform private.need_admin();
+  select * into f from public.features where id = p_feature_id;
+  if not found then raise exception 'unit not found' using errcode = '42501'; end if;
+  select * into tp from public.unit_templates where id = private.template_for(f.map_id, f.kind, f.asset_id, f.props);
+  if not found then raise exception 'this unit has no unit template' using errcode = '22023'; end if;
+  insert into public.unit_state (feature_id, map_id, strength, experience, stationary_turns)
+  values (f.id, f.map_id, least(tp.max_strength, greatest(0, coalesce((p ->> 'strength')::float8, tp.max_strength))),
+          greatest(0, coalesce((p ->> 'experience')::integer, 0)), greatest(0, coalesce((p ->> 'stationary_turns')::integer, 0)))
+  on conflict (feature_id) do update set
+    strength = case when p ? 'strength' then least(tp.max_strength, greatest(0, (p ->> 'strength')::float8)) else public.unit_state.strength end,
+    experience = case when p ? 'experience' then greatest(0, (p ->> 'experience')::integer) else public.unit_state.experience end,
+    stationary_turns = case when p ? 'stationary_turns' then greatest(0, (p ->> 'stationary_turns')::integer) else public.unit_state.stationary_turns end,
+    updated_at = now();
+end $$;
+
+create function public.end_engagement(p_id uuid) returns void
+language plpgsql volatile security definer set search_path = ''
+as $$
+declare e public.engagements;
+begin
+  perform private.need_admin();
+  update public.engagements x set status = 'ended', end_reason = 'ended by the owner', ended_turn = private.current_turn_number(x.map_id), updated_at = now()
+   where x.id = p_id and x.status = 'active' returning * into e;
+  if e.id is not null then perform private.log(e.map_id, private.actor(), 'ended engagement', null); end if;
+end $$;
+
+-- ---- terrain ----
+
+-- Share of the campaign area that is urban, forest and open (urban wins where both overlap).
+create function private.terrain_stats(p_map_id uuid) returns jsonb
+language sql stable set search_path = ''
+as $$
+  with a as (
+    select coalesce((select m.area from public.terrain_meta m where m.map_id = p_map_id),
+                    (select extensions.st_multi(extensions.st_envelope(extensions.st_collect(z.geom))) from public.terrain_zones z where z.map_id = p_map_id)) as g
+  ),
+  parts as (
+    select (select extensions.st_union(z.geom) from public.terrain_zones z where z.map_id = p_map_id and z.type = 'urban') as urban,
+           (select extensions.st_union(z.geom) from public.terrain_zones z where z.map_id = p_map_id and z.type = 'forest') as forest
+  ),
+  m as (
+    select extensions.st_area(a.g::extensions.geography) / 1e6 as total,
+           coalesce(extensions.st_area(extensions.st_intersection(p.urban, a.g)::extensions.geography) / 1e6, 0) as urban,
+           coalesce(extensions.st_area(extensions.st_intersection(
+             case when p.urban is null then p.forest else extensions.st_difference(p.forest, p.urban) end, a.g)::extensions.geography) / 1e6, 0) as forest
+    from a, parts p
+  )
+  select case when (select g from a) is null then jsonb_build_object('zones', 0) else (
+    select jsonb_build_object(
+      'zones', (select count(*) from public.terrain_zones z where z.map_id = p_map_id),
+      'total_km2', round(m.total::numeric, 1), 'urban_km2', round(m.urban::numeric, 1), 'forest_km2', round(m.forest::numeric, 1),
+      'urban_pct', round((100 * m.urban / nullif(m.total, 0))::numeric, 2), 'forest_pct', round((100 * m.forest / nullif(m.total, 0))::numeric, 2),
+      'open_pct', round((100 - 100 * (m.urban + m.forest) / nullif(m.total, 0))::numeric, 2),
+      'source', (select tm.source from public.terrain_meta tm where tm.map_id = p_map_id),
+      'generated_at', (select tm.generated_at from public.terrain_meta tm where tm.map_id = p_map_id))
+    from m) end;
+$$;
+
+-- Replace the map's terrain. p: {"zones": [{"type": "urban"|"forest", "geometry": GeoJSON}], "area": GeoJSON, "source": text, "options": {}}.
+-- Geometry is repaired and reduced to (multi)polygons here, so a bad shape cannot break lookups.
+create function public.replace_terrain(p_map_id uuid, p jsonb) returns jsonb
+language plpgsql volatile security definer set search_path = ''
+as $$
+declare
+  z jsonb;
+  g extensions.geometry;
+begin
+  perform private.need_map(p_map_id);
+  if jsonb_typeof(p -> 'zones') <> 'array' or jsonb_array_length(p -> 'zones') > 20000 or octet_length(p::text) > 30000000 then
+    raise exception 'invalid terrain' using errcode = '22023';
+  end if;
+  delete from public.terrain_zones where map_id = p_map_id;
+  for z in select * from jsonb_array_elements(p -> 'zones') loop
+    if z ->> 'type' not in ('urban', 'forest') then raise exception 'unknown terrain type' using errcode = '22023'; end if;
+    g := extensions.st_multi(extensions.st_collectionextract(extensions.st_makevalid(
+           extensions.st_setsrid(extensions.st_geomfromgeojson((z -> 'geometry')::text), 4326)), 3));
+    continue when g is null or extensions.st_isempty(g);
+    insert into public.terrain_zones (map_id, type, geom, area_km2)
+    values (p_map_id, z ->> 'type', g, extensions.st_area(g::extensions.geography) / 1e6);
+  end loop;
+  insert into public.terrain_meta (map_id, area, source, options, generated_at)
+  values (p_map_id,
+          case when p -> 'area' is not null and p -> 'area' <> 'null'::jsonb then extensions.st_multi(extensions.st_collectionextract(extensions.st_makevalid(
+                 extensions.st_setsrid(extensions.st_geomfromgeojson((p -> 'area')::text), 4326)), 3)) end,
+          left(p ->> 'source', 200), coalesce(p -> 'options', '{}'), now())
+  on conflict (map_id) do update set area = excluded.area, source = excluded.source, options = excluded.options, generated_at = now();
+  perform private.log(p_map_id, private.actor(), 'generated terrain', left(p ->> 'source', 200));
+  return private.terrain_stats(p_map_id);
+end $$;
+
+create function private.terrain_json(p_map_id uuid) returns jsonb
+language sql stable set search_path = ''
+as $$
+  select jsonb_build_object('type', 'FeatureCollection', 'features', coalesce((
+    select jsonb_agg(jsonb_build_object('type', 'Feature', 'properties', jsonb_build_object('type', z.type, 'area_km2', round(z.area_km2::numeric, 1)),
+                                        'geometry', extensions.st_asgeojson(z.geom, 5)::jsonb))
+    from public.terrain_zones z where z.map_id = p_map_id), '[]'::jsonb));
+$$;
+
+create function public.get_terrain(p_map_id uuid) returns jsonb
+language plpgsql stable security definer set search_path = ''
+as $$ begin
+  perform private.need_map(p_map_id);
+  return private.terrain_json(p_map_id) || jsonb_build_object('stats', private.terrain_stats(p_map_id),
+    'area', (select extensions.st_asgeojson(m.area, 5)::jsonb from public.terrain_meta m where m.map_id = p_map_id));
+end $$;
+
+-- Terrain is common knowledge: every player and viewer of the map may see it.
+create function public.get_player_terrain(p_player_id uuid) returns jsonb
+language plpgsql stable security definer set search_path = ''
+as $$
+declare p public.players := private.me(p_player_id);
+begin
+  if p.id is null then return null; end if;
+  return private.terrain_json(p.map_id);
+end $$;
+
+create function public.get_shared_terrain(p_token text) returns jsonb
+language plpgsql stable security definer set search_path = ''
+as $$
+declare l public.share_links;
+begin
+  if p_token is null or char_length(p_token) <> 64 then return null; end if;
+  select * into l from public.share_links where token = p_token;
+  if not found or l.revoked or (l.expires_at is not null and l.expires_at <= now()) then return null; end if;
+  return private.terrain_json(l.map_id);
+end $$;
+
+-- ---------------------------------------------------------------------------
 -- 8. History, rollback, backup
 -- ---------------------------------------------------------------------------
 
@@ -2077,7 +2824,16 @@ as $$ begin
     'snapshots', coalesce((select jsonb_agg(to_jsonb(x)) from public.snapshots x where x.map_id = p_map_id), '[]'::jsonb),
     'share_links', coalesce((select jsonb_agg(to_jsonb(x)) from public.share_links x where x.map_id = p_map_id), '[]'::jsonb),
     'tech_items', coalesce((select jsonb_agg(to_jsonb(x)) from public.tech_items x where x.map_id = p_map_id), '[]'::jsonb),
-    'spawn_zones', coalesce((select jsonb_agg(to_jsonb(x)) from public.spawn_zones x where x.map_id = p_map_id), '[]'::jsonb));
+    'spawn_zones', coalesce((select jsonb_agg(to_jsonb(x)) from public.spawn_zones x where x.map_id = p_map_id), '[]'::jsonb),
+    'weapon_profiles', coalesce((select jsonb_agg(to_jsonb(x)) from public.weapon_profiles x where x.map_id = p_map_id), '[]'::jsonb),
+    'unit_templates', coalesce((select jsonb_agg(to_jsonb(x)) from public.unit_templates x where x.map_id = p_map_id), '[]'::jsonb),
+    'unit_state', coalesce((select jsonb_agg(to_jsonb(x)) from public.unit_state x where x.map_id = p_map_id), '[]'::jsonb),
+    'engagements', coalesce((select jsonb_agg(to_jsonb(x)) from public.engagements x where x.map_id = p_map_id), '[]'::jsonb),
+    'combat_settings', coalesce((select jsonb_agg(to_jsonb(x)) from public.combat_settings x where x.map_id = p_map_id), '[]'::jsonb),
+    'combat_reports', coalesce((select jsonb_agg(to_jsonb(x)) from public.combat_reports x where x.map_id = p_map_id), '[]'::jsonb),
+    'terrain', private.terrain_json(p_map_id),
+    'terrain_meta', (select jsonb_build_object('area', extensions.st_asgeojson(m.area)::jsonb, 'source', m.source, 'options', m.options)
+                     from public.terrain_meta m where m.map_id = p_map_id));
 end $$;
 
 -- Restore a backup under its original ids, so existing invite and share links keep working.
@@ -2125,9 +2881,33 @@ begin
   -- Backups from before schema 4 have no tech tree.
   insert into public.tech_items select * from jsonb_populate_recordset(null::public.tech_items, coalesce(p -> 'tech_items', '[]'));
   insert into public.spawn_zones select * from jsonb_populate_recordset(null::public.spawn_zones, coalesce(p -> 'spawn_zones', '[]'));
+  -- Backups from before schema 8 have no combat data.
+  insert into public.weapon_profiles select * from jsonb_populate_recordset(null::public.weapon_profiles, coalesce(p -> 'weapon_profiles', '[]'));
+  insert into public.unit_templates
+    select * from jsonb_populate_recordset(null::public.unit_templates, (
+      select coalesce(jsonb_agg(case when exists (select 1 from public.assets a where a.id::text = e ->> 'asset_id') then e else e - 'asset_id' end), '[]'::jsonb)
+      from jsonb_array_elements(coalesce(p -> 'unit_templates', '[]')) e));
+  insert into public.unit_state select * from jsonb_populate_recordset(null::public.unit_state, coalesce(p -> 'unit_state', '[]'))
+    where feature_id in (select id from public.features where map_id = mid);
+  insert into public.engagements select * from jsonb_populate_recordset(null::public.engagements, coalesce(p -> 'engagements', '[]'));
+  insert into public.combat_settings select * from jsonb_populate_recordset(null::public.combat_settings, coalesce(p -> 'combat_settings', '[]'));
+  insert into public.combat_reports select * from jsonb_populate_recordset(null::public.combat_reports, coalesce(p -> 'combat_reports', '[]'))
+    where player_id in (select id from public.players where map_id = mid);
+  insert into public.terrain_zones (map_id, type, geom, area_km2)
+    select mid, f -> 'properties' ->> 'type', extensions.st_multi(extensions.st_setsrid(extensions.st_geomfromgeojson((f -> 'geometry')::text), 4326)),
+           coalesce((f -> 'properties' ->> 'area_km2')::float8, 0)
+    from jsonb_array_elements(coalesce(p -> 'terrain' -> 'features', '[]')) f;
+  if p -> 'terrain_meta' is not null and p -> 'terrain_meta' <> 'null'::jsonb then
+    insert into public.terrain_meta (map_id, area, source, options)
+    values (mid, case when p -> 'terrain_meta' -> 'area' <> 'null'::jsonb
+                   then extensions.st_multi(extensions.st_setsrid(extensions.st_geomfromgeojson((p -> 'terrain_meta' -> 'area')::text), 4326)) end,
+            p -> 'terrain_meta' ->> 'source', coalesce(p -> 'terrain_meta' -> 'options', '{}'));
+  end if;
   -- Everything above must belong to the one map in the file.
   if exists (select 1 from jsonb_array_elements(p -> 'layers' || p -> 'players' || p -> 'features' || p -> 'turns' || p -> 'snapshots' || p -> 'share_links'
-                                                || coalesce(p -> 'tech_items', '[]') || coalesce(p -> 'spawn_zones', '[]')) e
+                                                || coalesce(p -> 'tech_items', '[]') || coalesce(p -> 'spawn_zones', '[]')
+                                                || coalesce(p -> 'weapon_profiles', '[]') || coalesce(p -> 'unit_templates', '[]')
+                                                || coalesce(p -> 'engagements', '[]') || coalesce(p -> 'combat_settings', '[]')) e
                  where e ->> 'map_id' is distinct from mid::text)
      or exists (select 1 from jsonb_array_elements(p -> 'rules' || p -> 'allocations' || p -> 'drafts') e
                  where (e ->> 'turn_id')::uuid not in (select id from public.turns where map_id = mid)) then
@@ -2243,6 +3023,7 @@ begin
                                from public.spawn_zones z
                               where z.map_id = p.map_id
                                 and (z.player_id = p.id or (z.team is not null and z.team = p.team) or (z.player_id is null and z.team is null))), '[]'::jsonb),
+    'combat', private.player_combat(p),
     -- Own units that are spawn points, where they stand now (they may be on a layer this player cannot see).
     'spawn_points', coalesce((select jsonb_agg(jsonb_build_object('feature_id', f.id, 'center', to_jsonb(private.anchor(f.geometry)), 'radius_m', x.spawn_radius_m,
                                   'name', x.name, 'item_id', x.id))
@@ -2363,7 +3144,8 @@ alter table public.players add column if not exists pin_set boolean generated al
 
 revoke all on public.app_meta, public.maps, public.layers, public.features, public.assets, public.share_links, public.players,
   public.turns, public.turn_move_rules, public.allocations, public.drafts, public.snapshots, public.activity,
-  public.tech_items, public.spawn_zones
+  public.tech_items, public.spawn_zones, public.weapon_profiles, public.unit_templates, public.unit_state, public.engagements,
+  public.combat_settings, public.combat_previews, public.combat_reports, public.terrain_zones, public.terrain_meta
   from public, anon, authenticated;
 grant usage on schema public to anon, authenticated;
 grant usage on schema private to authenticated;
@@ -2378,9 +3160,10 @@ do $$
 declare t text;
 begin
   foreach t in array array['app_meta','maps','layers','features','assets','share_links','players','turns','turn_move_rules',
-                           'allocations','drafts','snapshots','activity','tech_items','spawn_zones'] loop
+                           'allocations','drafts','snapshots','activity','tech_items','spawn_zones','weapon_profiles','unit_templates',
+                           'unit_state','engagements','combat_settings','combat_previews','combat_reports','terrain_zones','terrain_meta'] loop
     execute format('alter table public.%I enable row level security', t);
-    if t not in ('app_meta', 'snapshots', 'activity', 'tech_items', 'spawn_zones') then
+    if t in ('maps','layers','features','assets','share_links','players','turns','turn_move_rules','allocations','drafts') then
       execute format('create policy %I on public.%I for all to authenticated using (private.is_admin()) with check (private.is_admin())', t || '_admin', t);
     end if;
   end loop;
@@ -2404,10 +3187,12 @@ begin
         'get_snapshot','rollback_to','export_campaign','import_campaign','create_share_link','update_share_link','get_shared_map',
         'get_settings','set_discord_webhook','test_discord_webhook','claim_invite','get_player_state','get_player_history','save_draft','set_ready',
         'get_economy','save_tech_item','delete_tech_item','save_spawn_zone','delete_spawn_zone','set_player_points','set_player_tech',
-        'move_tech_items']) then
+        'move_tech_items',
+        'get_combat_admin','save_weapon','save_unit_template','save_combat_settings','set_unit_state','end_engagement',
+        'get_combat_inputs','save_combat_preview','get_combat_preview','replace_terrain','get_terrain','get_player_terrain','get_shared_terrain']) then
       execute 'revoke all on function ' || r.sig || ' from public, anon';
       execute 'grant execute on function ' || r.sig || ' to authenticated';
-      if r.proname in ('app_status', 'keepalive', 'get_shared_map') then
+      if r.proname in ('app_status', 'keepalive', 'get_shared_map', 'get_shared_terrain') then
         execute 'grant execute on function ' || r.sig || ' to anon';
       end if;
     end if;
@@ -2445,7 +3230,7 @@ exception when others then
   raise notice 'pg_net is not available here; Discord announcements are disabled';
 end $$;
 
-insert into public.app_meta (key, value) values ('schema_version', '7')
+insert into public.app_meta (key, value) values ('schema_version', '8')
 on conflict (key) do update set value = excluded.value, updated_at = now();
 
 commit;

@@ -70,6 +70,33 @@ Players can buy their own reinforcements instead of you allocating them.
 - **Release by turn**: give an item "Released on turn N". Players do not see it, and cannot research or (if free) buy it, before turn N. You always see the whole tree; boxes show "turn N". Income is paid at each push, for the units each player owns after the turn's moves.
 - Balances are stored with every turn, so a rollback restores them. Manual reinforcements (Turn > Reinforcements) still work alongside the tree.
 
+### Ground combat
+
+Units fight when they have a **unit template** (Combat > Unit templates): max strength, armor, category, and one or more **weapons**
+(Combat > Weapons: attacks, AP, range, indirect). A unit gets its template from its properties ("Unit template"), from its tech item, or by
+matching the template's NATO symbol or graphic. Air and naval units are left out of ground combat for now.
+
+- **Players** pick a target per weapon on their own units (unit details > Pick target, then click the enemy), or leave it empty to return fire
+  when attacked. An engaged unit cannot move; ticking **Retreat** lets it leave after one parting round of enemy fire.
+- **Damage** per weapon per round: `Attacks − Armor × (Armor − AP) / AP` (armor 0 = attacks; AP 0 = 0; kept between 0 and 1.5 × attacks),
+  then × attacker stationary, target stationary, target dug in, attacker strength ratio, terrain at the target, flank, veteran bonus and a
+  variance roll, rounded up. Every number is in Combat > Settings.
+- **Turn order at push:** movement, then combat on the final positions: indirect fire first, then each engagement. A new engagement's first
+  round lets the attacker fire first (both at once if both sides declared on each other); later rounds are simultaneous. Rounds per turn:
+  1 on first contact, +1 per turn engaged, at most 3. Engagements carry on until a unit is destroyed, a unit retreats, or a round deals no damage.
+- **Review:** Turn > Combat > "Resolve combat (preview)" computes everything without applying it and shows each round and shot: base damage,
+  every multiplier, the roll and the result. Type over any number to hand-edit it, re-roll one engagement or all. Push applies exactly the
+  saved preview (it is recomputed first if anything changed since), and the full log is stored with the turn's snapshot.
+- **Intel:** players see exact numbers for their own units only. Other units within the intel range (100 km) of any of their units show an
+  estimate: fresh, damaged, heavily damaged or critical. Beyond that range nothing is sent at all. Each push gives every player a combat report.
+- **Recovery:** a unit that stays put and is not engaged regains 10% of max strength per turn.
+- **Settings are versioned:** saving applies from the current turn on; earlier turns keep the numbers they were played with.
+- **Sandbox** (Combat > Sandbox): pick attacker, defender and conditions and see the full breakdown, for balancing.
+- **Terrain** (Combat > Terrain > Generate terrain): pick the campaign area (current view, a selected shape or a country). The app downloads
+  OpenStreetMap land use for that area only, keeps large cities (from 25 km²) and large forests (from 50 km²), merges neighbours, simplifies, and
+  stores the zones once (PostGIS). Coverage (open / urban / forest %) shows afterwards; change a threshold and regenerate in one click. Urban takes
+  ×0.7 and forest ×0.8 damage by default. Everyone can switch the terrain overlay on ("Terrain" button) with a legend.
+
 ### Map tools
 
 - **Measure** (editor: ruler tool or M; player and viewer pages: Measure button): click points for a distance, or switch to Area for area and perimeter. Double-click, Enter or Finish ends it. Nothing is saved.
@@ -81,7 +108,7 @@ Everyone has a turn slider to step back through earlier turns. Under Manage > Hi
 ## Updating to a newer version
 
 1. Upload the new `release` folder the same way as in step 2, but leave `config.js` out of the upload (or re-enter your two values afterwards).
-2. Open the site. If it says "The database needs an upgrade", paste the new `setup.sql` into the Supabase SQL editor and run it. Running it again is always safe: it keeps your data and rebuilds only functions and rules.
+2. Open the site. If it says "The database needs an upgrade", paste the new `setup.sql` into the Supabase SQL editor and run it. Since schema 8 it also switches on the PostGIS extension (in the `extensions` schema); if Supabase refuses, enable PostGIS under Database > Extensions and run the file again. Running it again is always safe: it keeps your data and rebuilds only functions and rules.
 
 ## If something stops working
 
@@ -142,6 +169,20 @@ Nothing in this table needs Supabase or GitHub. Each control calls a database fu
 | Grant or remove research for a player | Tech > Player points > Researched | `set_player_tech` |
 | Spawn zones (countries or drawn shapes) per player, team or everyone | Tech > Spawn zones | `save_spawn_zone`, `delete_spawn_zone` |
 | Tech type of a unit already on the map | Select on map > properties > Tech type | map edit (row level security) |
+| **Ground combat** | | |
+| Unit templates: create, edit, clone, delete, restore | Combat > Unit templates | `save_unit_template`, `get_combat_admin` |
+| Weapon profiles: create, edit, clone, delete, restore | Combat > Weapons | `save_weapon` |
+| Every combat number (multipliers, flanking arcs, veteran bonus, variance, clamp, rounds, parting round, recovery, intel range and bands, terrain multipliers, terrain thresholds), versioned per turn | Combat > Settings | `save_combat_settings` |
+| A unit's template | Select on map > properties > Unit template | map edit (row level security) |
+| Tech item's template (units bought from it) | Tech > Tech tree > an item > Combat stats | `save_tech_item` |
+| Per-unit strength, experience, stationary turns | Select on map > properties | `set_unit_state` |
+| End an engagement | Combat > Engagements, or a unit's properties | `end_engagement` |
+| Resolve combat (preview), breakdown, hand edits, re-roll one or all | Turn (locked) > Combat | `get_combat_inputs`, `save_combat_preview`, `get_combat_preview` |
+| Apply combat | Turn > Push turn | `push_turn` |
+| Generate or upload terrain, coverage stats, clear | Combat > Terrain | `replace_terrain`, `get_terrain` |
+| Terrain types and their multipliers | Combat > Settings > Terrain | `save_combat_settings` |
+| Terrain overlay | "Terrain" button (all pages) | `get_terrain`, `get_player_terrain`, `get_shared_terrain` |
+| Damage sandbox | Combat > Sandbox | none (computed in the browser) |
 | **History** | | |
 | View any past turn, unfiltered | Turn slider (bottom right), or Manage > History > View | `get_snapshot` |
 | Roll back | Manage > History and backup > Roll back to here | `rollback_to` |
@@ -189,6 +230,11 @@ Client checks exist only to make the pages pleasant. These hold no matter what a
 - A rollback restores the map and opens a new turn labelled "rolled back from turn N". Later turns stay in the history and the drafts of the abandoned turn are kept.
 - Graphics are never hard-deleted, because old turns refer to them.
 
+- Attack orders name the attacker's own weapons, one target each, and only ground units of other players that the player can see. A unit in
+  an engagement cannot move unless ordered to retreat. Combat can only be applied by a push, from a preview built on exactly the drafts,
+  units and settings of that moment.
+- Players never receive weapon numbers, armor, or any other unit's exact strength; units beyond intel range are not described at all.
+
 Sanity limits, the only ones there are: 200 changes and 256 kB per draft, 200 players per map, PIN lockout for 15 minutes after 5 wrong tries.
 
 ## Security notes
@@ -218,6 +264,11 @@ Both basemaps are free and need no key. Fine for a private game; check the terms
 
 Country borders for spawn zones: Natural Earth 1:50m (public domain) via the world-atlas package (ISC), in `countries.json`. Borders are simplified and follow Natural Earth's de facto boundaries; disputed areas may not match what your players expect.
 
+Terrain: OpenStreetMap data (© OpenStreetMap contributors, ODbL) through OpenFreeMap's free vector tiles (OpenMapTiles schema). The generated
+zones are a derived database; for a private game that is fine, but if you publish the terrain itself, ODbL asks you to credit OpenStreetMap and
+share it under the same licence. Generation runs in your browser and has not been tested against the live tile service from the development
+machine; if it fails, the GeoJSON upload is the fallback.
+
 Libraries: MapLibre GL JS (BSD-3), milsymbol (MIT), Turf (MIT), DOMPurify (Apache-2.0/MPL-2.0), supabase-js (MIT), zustand (MIT), React (MIT).
 
 Free-tier limits that matter: Supabase 500 MB database and 1 GB file storage; GitHub Pages 1 GB site and about 100 GB of traffic a month. Supabase's built-in email sends only a few messages an hour, which is enough for the odd confirmation or password reset.
@@ -235,6 +286,6 @@ npm run dev          # dev server; put VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KE
 npm run release      # typecheck, build into src/dist, then copy the site into the repository root (keeps config.js)
 ```
 
-`npm run fake` runs the real `setup.sql` in an in-process Postgres behind a small stand-in for Supabase's API, so the whole app can be tried with no account. `tests/e2e/scenario.mjs` drives a complete turn through it in a headless browser, `tests/e2e/tech.mjs` the tech tree, and `tests/e2e/tools.mjs` measuring, export and the player page on a phone (all need Playwright installed separately).
+`npm run fake` runs the real `setup.sql` in an in-process Postgres behind a small stand-in for Supabase's API, so the whole app can be tried with no account. `tests/e2e/scenario.mjs` drives a complete turn through it in a headless browser, `tests/e2e/tech.mjs` the tech tree, and `tests/e2e/tools.mjs` measuring, export and the player page on a phone, and `tests/e2e/combat.mjs` ground combat (all need Playwright installed separately).
 
 When you change the database, edit `supabase/setup.sql`, raise the number in its last statement and `SCHEMA_VERSION` in `app/lib/supabase.ts` together, and keep the file re-runnable: `tests/upgrade.test.ts` runs it over an older schema and twice in a row.

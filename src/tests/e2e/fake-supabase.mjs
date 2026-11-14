@@ -11,6 +11,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { dirname, extname, join, normalize, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PGlite } from '@electric-sql/pglite';
+import { postgis } from '@electric-sql/pglite-postgis';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const SITE = resolve(here, '../../dist');
@@ -18,7 +19,7 @@ const PORT = Number(process.env.PORT ?? 54399);
 const ORIGIN = `http://localhost:${PORT}`;
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.png': 'image/png', '.svg': 'image/svg+xml', '.webp': 'image/webp' };
 
-const db = new PGlite();
+const db = new PGlite({ extensions: { postgis } });
 await db.exec(`
   create role anon nologin; create role authenticated nologin; create schema auth;
   create table auth.users (id uuid primary key default gen_random_uuid(), email text unique, email_confirmed_at timestamptz, password text, is_anonymous boolean default false);

@@ -2,6 +2,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { PGlite } from '@electric-sql/pglite';
+import { postgis } from '@electric-sql/pglite-postgis';
 import { beforeAll, describe, expect, it } from 'vitest';
 
 const U = (n: string) => `00000000-0000-4000-8000-0000000000${n}`;
@@ -48,7 +49,7 @@ async function push() {
 }
 
 beforeAll(async () => {
-  db = new PGlite();
+  db = new PGlite({ extensions: { postgis } });
   await db.exec(`
     create role anon nologin;
     create role authenticated nologin;

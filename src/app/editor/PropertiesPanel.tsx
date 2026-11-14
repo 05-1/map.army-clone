@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef } from 'react';
 import { fmtLatLon } from '../lib/geo';
 import { AFFILIATIONS, ECHELONS, isLetterSidc, MODIFIERS, setSidcChar } from '../lib/symbols';
-import type { Dash, Feature, Pos, Props, Style } from '../lib/types';
+import type { CombatAdmin, Dash, Feature, Pos, Props, Style } from '../lib/types';
+import type { Backend } from './backend';
 import { useEd } from './store';
 import { ColorPicker, Field, IconButton, Section } from './ui';
 
@@ -66,13 +67,14 @@ function StyleFields(p: { style: Partial<Style>; set: (s: Partial<Style>) => voi
   );
 }
 
-export function PropertiesPanel({ onAssign }: { onAssign?: (ids: string[], playerId: string | null) => void }) {
+export function PropertiesPanel({ onAssign, backend, refreshCombat }: { onAssign?: (ids: string[], playerId: string | null) => void; backend?: Backend; refreshCombat?: () => Promise<void> }) {
   const features = useEd((s) => s.features);
   const selection = useEd((s) => s.selection);
   const layers = useEd((s) => s.layers);
   const assets = useEd((s) => s.assets);
   const players = useEd((s) => s.players);
   const techItems = useEd((s) => s.bundle?.economy.items);
+  const combat = useEd((s) => s.combat);
   const nameRef = useRef<HTMLTextAreaElement>(null);
   const st = useEd.getState;
 
@@ -185,6 +187,9 @@ export function PropertiesPanel({ onAssign }: { onAssign?: (ids: string[], playe
             ))}
           </select>
         </Field>
+      )}
+      {combat && sel.every((f) => f.kind === 'symbol' || f.kind === 'asset') && (
+        <CombatFields ids={ids} sel={sel} combat={combat} backend={backend} refresh={refreshCombat} setP={setP} cp={cp} />
       )}
       <Field label="Time" wide>
         <span className="inline">
@@ -302,4 +307,56 @@ export function PropertiesPanel({ onAssign }: { onAssign?: (ids: string[], playe
 
 function titleOf(f: Feature) {
   return { symbol: 'Unit', asset: 'Graphic', text: 'Text', line: 'Line', arrow: 'Arrow', polygon: 'Polygon', circle: 'Circle', freehand: 'Freehand' }[f.kind];
+}
+
+/** Unit template, and for one unit its live combat state with owner overrides. */
+function CombatFields(p: { ids: string[]; sel: Feature[]; combat: CombatAdmin; backend?: Backend; refresh?: () => Promise<void>; setP(p: Partial<Props>): void; cp(): void }) {
+  const { sel, combat, backend, refresh } = p;
+  const one = sel.length === 1 ? sel[0] : null;
+  const live = one ? combat.units[one.id] : undefined;
+  const tpl = combat.templates.find((t) => t.id === (one?.props.unit ?? live?.template));
+  const value = common(sel, (f) => f.props.unit ?? '');
+  const auto = one && !one.props.unit && live ? combat.templates.find((t) => t.id === live.template)?.name : undefined;
+  const eng = one ? combat.engagements.find((e) => e.units.some((u) => u.fid === one.id)) : undefined;
+  const save = async (patch: { strength?: number; experience?: number; stationary_turns?: number }) => {
+    if (!one || !backend) return;
+    try {
+      await backend.setUnitState(one.id, patch);
+      await refresh?.();
+    } catch (e) {
+      useEd.getState().say((e as Error).message);
+    }
+  };
+  const n = (v: string) => Math.max(0, Math.round(+v) || 0);
+  return (
+    <>
+      <Field label="Unit template (combat stats)" wide>
+        <select value={value ?? '__mixed'} onChange={(e) => (p.cp(), p.setP({ unit: e.target.value || undefined }))}>
+          {value === undefined && <option value="__mixed" disabled>Mixed</option>}
+          <option value="">{auto ? `Automatic: ${auto}` : 'Automatic (tech item, or same symbol / graphic)'}</option>
+          {combat.templates.filter((t) => !t.deleted_at || t.id === value).map((t) => <option key={t.id} value={t.id}>{t.name} ({t.category})</option>)}
+        </select>
+      </Field>
+      {one && live && tpl && (
+        <div className="row2 wrap">
+          <Field label={`Strength (max ${tpl.max_strength})`}>
+            <input type="number" min={0} max={tpl.max_strength} key={`s${live.strength}`} defaultValue={Math.round(live.strength ?? tpl.max_strength)}
+              onBlur={(e) => n(e.target.value) !== Math.round(live.strength ?? tpl.max_strength) && void save({ strength: n(e.target.value) })} />
+          </Field>
+          <Field label="Experience">
+            <input type="number" min={0} key={`x${live.experience}`} defaultValue={live.experience ?? 0} onBlur={(e) => n(e.target.value) !== (live.experience ?? 0) && void save({ experience: n(e.target.value) })} />
+          </Field>
+          <Field label="Stationary turns">
+            <input type="number" min={0} key={`t${live.stationary_turns}`} defaultValue={live.stationary_turns ?? 0} onBlur={(e) => n(e.target.value) !== (live.stationary_turns ?? 0) && void save({ stationary_turns: n(e.target.value) })} />
+          </Field>
+          {eng && (
+            <button type="button" className="btn sm danger" onClick={() => confirm('End the engagement this unit is in?') && backend && void backend.endEngagement(eng.id).then(() => refresh?.(), (e) => useEd.getState().say((e as Error).message))}>
+              End its engagement
+            </button>
+          )}
+        </div>
+      )}
+      {one && !live && value && <p className="tip">Combat state appears once the unit is saved.</p>}
+    </>
+  );
 }

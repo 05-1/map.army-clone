@@ -24,6 +24,10 @@ interface Ed extends Doc {
   players: Player[];
   /** The turn in progress with its rules, allocations and every player's draft. */
   bundle: TurnBundle | null;
+  /** Templates, weapons, settings and live unit state for ground combat. */
+  combat: import('../lib/types').CombatAdmin | null;
+  /** Draw the terrain zones on the map. */
+  showTerrain: boolean;
   /** Draw all drafts, zones and conflicts over the live map (turn panel open). */
   showDrafts: boolean;
   /** The player whose draft is being edited. While set, the live map is locked. */
@@ -90,6 +94,8 @@ export const useEd = create<Ed>()((set, get) => ({
   showDrafts: false,
   review: null,
   zoneDraw: false,
+  combat: null,
+  showTerrain: false,
   viewing: null,
   selection: [],
   tool: 'select',

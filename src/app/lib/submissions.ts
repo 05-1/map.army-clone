@@ -116,6 +116,11 @@ export function describeChange(c: Change, live: Map<string, Feature>, tech: read
   if (c.payload.geometry) parts.push('Move');
   if (c.payload.heading != null) parts.push(`${parts.length ? 'turn' : 'Turn'} to ${Math.round(c.payload.heading)}°`);
   if (c.payload.order) parts.push(parts.length ? 'order' : 'Order');
+  if (c.payload.attacks?.length) {
+    const targets = c.payload.attacks.map((a) => nameOf(live.get(a.target))).join(', ');
+    parts.push(`${parts.length ? 'attack' : 'Attack'} ${targets}`);
+  }
+  if (c.payload.retreat) parts.push(parts.length ? 'retreat' : 'Retreat');
   return `${parts.join(', ') || 'Change'}: ${nameOf(f)}`;
 }
 
@@ -131,6 +136,8 @@ export function summarize(changes: Change[]): string {
       if (c.payload.geometry) add('move');
       else if (c.payload.heading != null) add('turn');
       if (c.payload.order) add('order');
+      if (c.payload.attacks?.length) add('attack order');
+      if (c.payload.retreat) add('retreat');
     }
   }
   if (!n.size) return 'No changes';
