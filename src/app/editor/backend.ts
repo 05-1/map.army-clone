@@ -15,6 +15,8 @@ export interface NewLink {
   visibleLayers: string[] | null;
   expiresAt: string | null;
   label: string;
+  /** Squadrons viewers see: none, all, or "team:<team>". */
+  airPicture: string;
 }
 
 export interface NewPlayer {
@@ -28,7 +30,7 @@ export interface NewPlayer {
 export type MapPatch = Partial<Pick<MapMeta, 'name' | 'basemap' | 'center' | 'zoom' | 'palette_assets' | 'palette_symbols' | 'archived'>>;
 export type PlayerPatch = Partial<Pick<Player, 'name' | 'team' | 'color' | 'visible_layers' | 'target_layer_id' | 'revoked'>>;
 export type TurnPatch = Partial<Pick<Turn, 'deadline' | 'default_radius_m' | 'conflict_m' | 'carry_allocations'>>;
-export type LinkPatch = Partial<Pick<ShareLink, 'revoked' | 'expires_at' | 'label' | 'visible_layers'>>;
+export type LinkPatch = Partial<Pick<ShareLink, 'revoked' | 'expires_at' | 'label' | 'visible_layers' | 'air_picture'>>;
 export interface DraftReview {
   rejected?: string[];
   owner_changes?: Change[] | null;
@@ -79,7 +81,7 @@ const MAP_COLS = 'id, name, basemap, center, zoom, live_channel, palette_assets,
 const FEATURE_COLS = 'id, layer_id, kind, geometry, props, style, asset_id, z, owner_player_id';
 const PLAYER_COLS = 'id, map_id, name, team, color, invite_token, visible_layers, target_layer_id, revoked, claimed_at, created_at, pin_set, pin_locked_until, last_seen_at';
 const ASSET_COLS = 'id, name, path, mime, width, height, deleted_at';
-const LINK_COLS = 'id, map_id, token, mode, visible_layers, expires_at, revoked, label, created_at';
+const LINK_COLS = 'id, map_id, token, mode, visible_layers, expires_at, revoked, label, created_at, air_picture';
 const WATCH_POLL_MS = 45_000;
 
 function must<T>(res: { data: T; error: { message: string } | null }): T {
@@ -192,7 +194,7 @@ export class Backend {
     return must(await this.sb.from('share_links').select(LINK_COLS).eq('map_id', mapId).order('created_at', { ascending: false })) as ShareLink[];
   }
   createLink = (mapId: string, o: NewLink) =>
-    this.rpc<ShareLink>('create_share_link', { p_map_id: mapId, p_mode: o.mode, p_visible_layers: o.visibleLayers, p_expires_at: o.expiresAt, p_label: o.label || null });
+    this.rpc<ShareLink>('create_share_link', { p_map_id: mapId, p_mode: o.mode, p_visible_layers: o.visibleLayers, p_expires_at: o.expiresAt, p_label: o.label || null, p_air_picture: o.airPicture });
   updateLink = (id: string, patch: LinkPatch) => this.rpc<ShareLink>('update_share_link', { p_link_id: id, p_patch: patch });
   async deleteLink(id: string) {
     must(await this.sb.from('share_links').delete().eq('id', id));
@@ -258,6 +260,7 @@ export class Backend {
   seedAirFamilies = (mapId: string) => this.rpc<number>('seed_air_families', { p_map_id: mapId });
   saveAirWeapon = (mapId: string, w: Partial<import('../lib/types').AirWeapon> & { deleted?: boolean }) => this.rpc<string>('save_air_weapon', { p_map_id: mapId, p: w });
   saveSquadron = (mapId: string, q: Partial<import('../lib/types').Squadron>) => this.rpc<string>('save_squadron', { p_map_id: mapId, p: q });
+  saveAirRole = (mapId: string, r: Partial<import('../lib/types').AirRole> & { deleted?: boolean }) => this.rpc<string>('save_air_role', { p_map_id: mapId, p: r });
   deleteSquadron = (id: string) => this.rpc<void>('delete_squadron', { p_id: id });
 
   // ---- history ----

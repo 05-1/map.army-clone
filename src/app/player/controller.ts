@@ -12,8 +12,8 @@ import { publicAssetUrl } from '../lib/supabase';
 import type { Asset, CreatePayload, Feature, Pos } from '../lib/types';
 import { canPlace, sourcesFor, usable, whereText } from '../lib/tech';
 import { effective, pointsLeft, remaining, usePlay, type PTool } from './store';
-import { distanceM } from '../lib/geo';
-import { flyable, missionOf, missionPoint } from './AirPanel';
+import { clampMove, coverageAt, distM } from '../lib/air';
+import { addAttack, coverageFor, endPos } from './AirPanel';
 
 const S = () => usePlay.getState();
 const OVERLAY = 'play-overlay';
@@ -39,6 +39,7 @@ const overlayLayers = (color: string) => [
   { id: 'po-air-ring', type: 'line', source: OVERLAY, filter: ['==', ['get', 'o'], 'air-ring'], paint: { 'line-color': '#35c7f0', 'line-width': 1.5, 'line-dasharray': [4, 3], 'line-opacity': 0.8 } },
   { id: 'po-air-area', type: 'fill', source: OVERLAY, filter: ['==', ['get', 'o'], 'air-area'], paint: { 'fill-color': '#35c7f0', 'fill-opacity': 0.08 } },
   { id: 'po-air-edge', type: 'line', source: OVERLAY, filter: ['==', ['get', 'o'], 'air-area'], paint: { 'line-color': '#35c7f0', 'line-width': 1.5 } },
+  { id: 'po-air-tank', type: 'line', source: OVERLAY, filter: ['==', ['get', 'o'], 'air-tank'], paint: { 'line-color': '#30d158', 'line-width': 1.5, 'line-dasharray': [3, 2] } },
   { id: 'po-air-seen', type: 'line', source: OVERLAY, filter: ['==', ['get', 'o'], 'air-seen'], paint: { 'line-color': '#ffd60a', 'line-width': 1.5, 'line-dasharray': [1, 2] } },
   { id: 'po-air', type: 'line', source: OVERLAY, filter: ['==', ['get', 'o'], 'air'], layout: { 'line-cap': 'round' }, paint: { 'line-color': '#35c7f0', 'line-width': 2, 'line-dasharray': [0.5, 2] } },
   { id: 'po-vert', type: 'circle', source: OVERLAY, filter: ['==', ['get', 'o'], 'v'],
@@ -78,8 +79,8 @@ export class PlayController {
         this.cursor = null;
         map.getCanvas().style.cursor = s.tool === 'select' ? '' : 'crosshair';
       }
-      if (s.targeting !== p.targeting || s.airPick !== p.airPick) map.getCanvas().style.cursor = s.targeting || s.airPick ? 'crosshair' : '';
-      if (s.airSel !== p.airSel || s.airPick !== p.airPick || s.state !== p.state || s.draft !== p.draft || s.sel !== p.sel || s.tool !== p.tool || s.allocId !== p.allocId || s.buyId !== p.buyId || s.viewing !== p.viewing) this.draw();
+      if (s.targeting !== p.targeting || s.airTarget !== p.airTarget) map.getCanvas().style.cursor = s.targeting || s.airTarget ? 'crosshair' : '';
+      if (s.showRadar !== p.showRadar || s.airTarget !== p.airTarget || s.state !== p.state || s.draft !== p.draft || s.sel !== p.sel || s.tool !== p.tool || s.allocId !== p.allocId || s.buyId !== p.buyId || s.viewing !== p.viewing) this.draw();
     });
     this.draw();
   }
@@ -152,20 +153,29 @@ export class PlayController {
       }
     }
     if (!viewing && state.air) {
-      // Air: the open squadron's reach, every drafted mission's route, and last turn's recon circles.
-      const { airSel, airPick } = S();
-      const q = state.air.squadrons.find((x) => x.id === (airPick?.squadron ?? airSel));
-      if (q?.base_pos) add(circlePoly(q.base_pos, q.radius_m), 'air-ring');
-      for (const c of draft) {
-        if (c.op !== 'mission') continue;
-        const from = state.air.squadrons.find((x) => x.id === c.feature_id)?.base_pos;
-        const to = missionPoint(c.payload, draft);
-        if (!from || !to) continue;
-        add({ type: 'LineString', coordinates: [from, to] }, 'air');
-        if (c.payload.type === 'patrol') add(circlePoly(to, c.payload.radius_m ?? state.air.patrol_radius_km * 1000), 'air-area');
-        if (c.payload.type === 'recon') add(circlePoly(to, state.air.recon_radius_km * 1000), 'air-area');
+      // Air: the selected squadron's reach (dashed: how far it flies this turn; shaded: where it may end the turn),
+      // every own tanker's refuel circle, declared attacks, and this side's radar coverage when switched on.
+      const air = state.air;
+      const q = air.squadrons.find((x) => x.id === (S().airTarget ?? sel));
+      if (q && !q.grounded && !q.stranded) {
+        add(circlePoly(q.pos, q.airframe.speed_m), 'air-ring');
+        const cov = coverageFor(q);
+        for (const b of cov.bases) add(circlePoly(b.pos, b.radius_m), 'air-area');
       }
-      for (const r of state.air.reveals) add(circlePoly(r.center, r.radius_m), 'air-seen');
+      for (const t of air.squadrons) {
+        if (!t.airframe.tanker || t.state === 'landed' && !draft.some((c) => c.feature_id === t.id && c.op === 'update' && c.payload.geometry)) continue;
+        const at = endPos(t.id);
+        if (at) add(circlePoly(at, air.settings.refuel_radius_km * 1000), 'air-tank');
+      }
+      for (const c of draft) {
+        if (c.op !== 'update' || !c.payload.air_attacks?.length) continue;
+        const from = endPos(c.feature_id);
+        for (const a of c.payload.air_attacks) {
+          const to = endPos(a.target);
+          if (from && to) add({ type: 'LineString', coordinates: [from, to] }, 'air');
+        }
+      }
+      if (S().showRadar) for (const r of air.sensors) add(circlePoly(r.pos, r.range_m), 'air-seen');
     }
     if (e) add(e.f.geometry, e.f.geometry.type === 'Point' ? 'selpt' : 'sel');
     if (this.pts) {
@@ -185,6 +195,14 @@ export class PlayController {
     if (d && !S().viewing) return baseId(String(d.properties.fid));
     const l = this.map.queryRenderedFeatures(box, { layers: LIVE_HIT })[0];
     return l ? String(l.properties.fid) : null;
+  }
+
+  /** Another side's unit under the pointer (own units and draft ghosts are skipped), for picking targets. */
+  private hitEnemy(pt: { x: number; y: number }, r = 12): string | null {
+    const mine = new Set(S().state?.mine ?? []);
+    const box: [[number, number], [number, number]] = [[pt.x - r, pt.y - r], [pt.x + r, pt.y + r]];
+    const hits = this.map.queryRenderedFeatures(box, { layers: LIVE_HIT }).map((f) => String(f.properties.fid)).filter((id) => !mine.has(id));
+    return hits[0] ?? null;
   }
 
   private create(payload: CreatePayload) {
@@ -221,6 +239,17 @@ export class PlayController {
     if (!st || !it) return s.say('Pick something to buy first');
     if (!usable(it, st.economy.tech_unlocked, s.draft)) return s.say(`${it.name} is not researched yet`);
     if (pointsLeft().spawn < it.spawn_cost) return s.say(`Not enough spawn points for ${it.name}`);
+    if (it.category === 'squadron') {
+      const air = st.air;
+      const pending = (id: string) => s.draft.filter((c) => c.op === 'create' && c.payload.purchase_id && st.tech.find((x) => x.id === c.payload.purchase_id)?.category === 'squadron'
+        && distM(anchorOf(c.payload.geometry), air.bases.find((b) => b.id === id)!.pos) < 1).length;
+      const base = air.bases.filter((b) => distM(b.pos, at) <= Math.max(air.settings.land_snap_km * 1000, this.pxToM(at, 18)))
+        .sort((a, b) => distM(a.pos, at) - distM(b.pos, at))[0];
+      if (!base) return s.say(`Place ${it.name} on one of your airbases or carriers.`);
+      if (base.used + pending(base.id) >= base.capacity) return s.say(`${base.name} is full (${base.capacity} squadrons).`);
+      const name = `${it.name} ${air.squadrons.length + pending(base.id) + 1}`;
+      return this.create({ kind: 'symbol', geometry: { type: 'Point', coordinates: base.pos }, purchase_id: it.id, props: { name, sidc: it.sidc ?? 'SFAPMF---------', tint: st.player.color ?? undefined } });
+    }
     if (!canPlace(it, at, st.spawn_zones, st.spawn_points)) return s.say(`${it.name} must be placed ${whereText(it, st.tech)} (dashed outlines)`);
     const geometry: Feature['geometry'] = { type: 'Point', coordinates: at };
     const props = { ...it.props, name: it.props.name || it.name, tint: st.player.color ?? undefined };
@@ -286,32 +315,16 @@ export class PlayController {
     usePlay.setState({ sel: tg.fid });
   }
 
-  /** Set a squadron's mission target from a click: an enemy ground unit for a strike, a point otherwise. */
-  private pickMission(pk: { squadron: string; type: 'strike' | 'patrol' | 'recon' }, id: string | null, at: Pos) {
+  /** Add a target for a squadron from a click: an enemy unit, or an enemy squadron on this player's radar. */
+  private pickAirTarget(squadron: string, id: string | null) {
     const s = S();
-    const air = s.state?.air;
-    const q = air?.squadrons.find((x) => x.id === pk.squadron);
-    usePlay.setState({ airPick: null });
-    if (!air || !q) return;
-    if (!q.base_pos) return s.say(`${q.name} has no base.`);
-    if (flyable(q) < 1) return s.say(`${q.name} has no aircraft that can fly.`);
-    let to = at;
-    let target_unit: string | undefined;
-    if (pk.type === 'strike') {
-      const c = s.state!.combat;
-      if (!id || !s.state!.features.some((f) => f.id === id)) return s.say('No unit there. Choose Strike again and click an enemy unit.');
-      if (s.state!.mine.includes(id) || c?.own[id]) return s.say('That is one of your own units.');
-      if (c?.seen[id]?.ground === false) return s.say('Only ground units can be struck for now.');
-      const f = s.state!.features.find((x) => x.id === id)!;
-      to = anchorOf(f.geometry);
-      target_unit = id;
-    }
-    const d = distanceM(q.base_pos, to);
-    if (d > q.radius_m) return s.say(`Out of reach: ${Math.round(d / 1000)} km from ${q.base_name}, ${q.name} reaches ${Math.round(q.radius_m / 1000)} km with this loadout. A lighter loadout flies further.`);
-    const prev = missionOf(s.draft, q.id);
-    const radius_m = pk.type === 'patrol' ? (prev?.payload.type === 'patrol' && prev.payload.radius_m) || air.patrol_radius_km * 1000 : undefined;
-    // Changing a strike leaves its escorts in place; they follow the strike.
-    s.put({ op: 'mission', feature_id: q.id, payload: { type: pk.type, ...(target_unit ? { target_unit } : { target: to }), ...(radius_m ? { radius_m } : {}) } });
+    const q = s.state?.air.squadrons.find((x) => x.id === squadron);
+    usePlay.setState({ airTarget: null, sel: squadron });
+    if (!q) return;
+    if (!id || !s.state!.features.some((f) => f.id === id)) return s.say('No unit there. Choose "Add a target" again and click an enemy unit.');
+    if (s.state!.mine.includes(id)) return s.say('That is one of your own units.');
+    const why = addAttack(q, id);
+    if (why) s.say(why);
   }
 
   /** Buttons for touch screens, where there is no Enter key and double-tap is unreliable. */
@@ -335,6 +348,20 @@ export class PlayController {
     const s = S();
     const eff = effective(fid);
     if (!eff || !s.state) return null;
+    // A squadron: within its speed of where it stands, ending inside a base radius or a tanker circle;
+    // dropped near one of the player's bases, it lands there.
+    const q = s.state.air?.squadrons.find((x) => x.id === fid);
+    if (q) {
+      if (q.grounded || q.stranded) {
+        if (!this.warned) s.say(`${q.name} is ${q.stranded ? 'stranded' : 'grounded this turn'} and cannot fly.`);
+        this.warned = true;
+        return null;
+      }
+      const air = s.state.air;
+      const base = air.bases.find((b) => distM(endPos(b.id) ?? b.pos, want) <= Math.max(air.settings.land_snap_km * 1000, this.pxToM(want, 14)));
+      if (base && distM(q.pos, endPos(base.id) ?? base.pos) <= q.airframe.speed_m) return endPos(base.id) ?? base.pos;
+      return clampMove(q.pos, want, q.airframe.speed_m, coverageFor(q));
+    }
     if (eff.isNew) {
       const c = eff.change as { payload: CreatePayload };
       const bought = c.payload.purchase_id ? s.state.tech.find((x) => x.id === c.payload.purchase_id) : undefined;
@@ -380,6 +407,13 @@ export class PlayController {
   };
 
   private warned = false;
+
+  /** Metres covered by n screen pixels around a point. */
+  private pxToM(at: Pos, n: number): number {
+    const p = this.map.project(at);
+    const q = this.map.unproject([p.x + n, p.y]);
+    return distM(at, [q.lng, q.lat]);
+  }
   private onUp = () => {
     this.drag = null;
     this.warned = false;
@@ -390,9 +424,9 @@ export class PlayController {
     const at: Pos = [e.lngLat.lng, e.lngLat.lat];
     if (tool === 'measure') return; // the measuring tool takes the clicks
     const tg = S().targeting;
-    if (tg) return this.pickTarget(tg, this.hit(e.point, 12));
-    const pk = S().airPick;
-    if (pk) return this.pickMission(pk, this.hit(e.point, 12), at);
+    if (tg) return this.pickTarget(tg, this.hitEnemy(e.point) ?? this.hit(e.point, 12));
+    const pk = S().airTarget;
+    if (pk) return this.pickAirTarget(pk, this.hitEnemy(e.point) ?? this.hit(e.point, 12));
     if (tool === 'select') return usePlay.setState({ sel: this.hit(e.point, 10) });
     if (!S().editable()) return void S().put({ op: 'delete', feature_id: '' }); // explains why not
     if (!DRAW.includes(tool)) return this.place(tool, at);
@@ -415,7 +449,7 @@ export class PlayController {
       if (!this.pts.length) this.pts = null;
       this.draw();
     } else if (e.key === 'Escape') {
-      if (S().airPick || S().targeting) usePlay.setState({ airPick: null, targeting: null });
+      if (S().airTarget || S().targeting) usePlay.setState({ airTarget: null, targeting: null });
       else if (this.pts) {
         this.pts = null;
         this.cursor = null;

@@ -398,3 +398,4 @@ input:disabled, select:disabled { opacity: 0.45; }
 .msn select { height: 26px; }
 .revealed { border: 1px solid var(--accent); border-radius: 6px; padding: 6px 8px; font-size: 12px; }
 .sqline { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.note.warn { color: var(--warn, #ff9f0a); }

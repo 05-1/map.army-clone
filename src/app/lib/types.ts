@@ -98,6 +98,8 @@ export interface ShareLink {
   revoked: boolean;
   label: string | null;
   created_at: string;
+  /** Squadrons a viewer sees: none, all, or what one team sees ("team:Blue"). */
+  air_picture?: string;
 }
 
 /** What get_shared_map() returns to a viewer. */
@@ -167,7 +169,15 @@ export interface UpdatePayload {
   retreat?: boolean;
   /** Radar AA: emitting (true) or dark (false); kept until changed. */
   emit?: boolean;
+  /** Squadrons: targets this turn, each with the salvo per weapon (missiles for the whole squadron). */
+  air_attacks?: AirAttack[];
+  /** Tankers: which squadrons to refuel first when more end in the circle than it can serve. */
+  refuel_priority?: string[];
+  /** Squadrons: missiles per aircraft per phase fired back when attacked. Kept until changed. */
+  return_salvo?: number;
 }
+
+export interface AirAttack { target: string; weapons: { weapon: string; count: number }[] }
 
 export type Change =
   | { op: 'create'; feature_id: string; payload: CreatePayload }
@@ -175,12 +185,8 @@ export type Change =
   | { op: 'delete'; feature_id: string; payload?: Record<string, never> }
   /** Research a tech item. feature_id is the item's id. */
   | { op: 'research'; feature_id: string; payload?: Record<string, never> }
-  /** One mission per squadron per turn; feature_id is the squadron. */
-  | { op: 'mission'; feature_id: string; payload: { type: 'strike' | 'patrol' | 'escort' | 'recon'; target?: Pos; target_unit?: string; escort_of?: string; radius_m?: number } }
-  /** Replacement aircraft for a squadron, arriving at push. */
-  | { op: 'buy_aircraft'; feature_id: string; payload: { squadron: string; count: number } }
-  /** A new squadron at one of the player's airbases; feature_id becomes the squadron's id. */
-  | { op: 'buy_squadron'; feature_id: string; payload: { purchase_id: string; base: string; name?: string } };
+  /** Replacement aircraft for a landed squadron, arriving at push. */
+  | { op: 'buy_aircraft'; feature_id: string; payload: { squadron: string; count: number } };
 
 export interface HistoryEntry {
   number: number;
@@ -273,8 +279,10 @@ export interface TechItem {
   release_turn: number | null;
   /** Combat stats for units bought from it. */
   template_id: string | null;
-  /** category 'squadron': buying it raises a squadron of this airframe. */
+  /** category 'squadron': researching it unlocks this airframe; buying it raises a squadron of it at an airbase. */
   airframe_id?: string | null;
+  /** Missile tiers live in their own tree. */
+  tree?: 'main' | 'missiles';
   /** Place in the flowchart; null = laid out by tier. */
   pos_x: number | null;
   pos_y: number | null;
@@ -397,6 +405,8 @@ export interface UnitTemplate {
   deleted_at: string | null;
   /** Squadrons it can base (0 = not an airbase). */
   air_capacity?: number;
+  /** Radar or early-warning range: enemy aircraft within it × their signature show up (only while emitting). */
+  sensor_m?: number;
   /** Active protection against AGMs (percentage points). */
   aps?: number;
 }
@@ -459,11 +469,9 @@ export interface CombatReport {
 }
 
 export interface AirReport {
-  squadrons: { name: string; mission: string | null; before: number; after: number; lost: number }[];
+  squadrons: { name: string; before: number; after: number; lost: number; state: 'landed' | 'airborne'; forced: string | null; stranded: boolean; refueled_by: string | null }[];
   downed: number;
   strikes: { squadron: string; target: string; hits: number; shots: number; damage: number; destroyed: boolean; aborted: string | null }[];
-  recon: { squadron: string; center: Pos; radius_m: number; units: { name: string; type: string; strength: number; max: number }[];
-    squadrons: { name: string; airframe: string; aircraft: number; max: number }[] }[];
 }
 
 // ---------------------------------------------------------------------------
@@ -472,12 +480,31 @@ export interface AirReport {
 
 export type AirGuidance = 'radar' | 'ir' | 'harm' | 'agm' | 'none';
 
+export interface AirRole {
+  id: string;
+  name: string;
+  is_tanker: boolean;
+  /** Preset for new airframes of this role. */
+  payload_penalty: number;
+  sort: number;
+  deleted_at: string | null;
+}
+
 export interface Airframe {
   id: string;
   name: string;
+  role_id: string | null;
+  /** Derived from the role (read only). */
+  tanker?: boolean;
+  refuelable: boolean;
   hp: number;
+  /** Max move per turn. */
+  speed_m: number;
   hardpoints: number;
   max_payload: number;
+  payload_penalty: number;
+  /** Missile families it can carry. */
+  families: string[];
   radius_m: number;
   radar_m: number;
   signature: number;
@@ -487,6 +514,7 @@ export interface Airframe {
   gun_accuracy: number;
   gun_damage: number;
   gun_range_m: number;
+  landed_armor: number;
   squadron_size: number;
   cost_per_aircraft: number;
   asset_id: string | null;
@@ -524,47 +552,58 @@ export interface AirWeapon {
 
 export interface LoadoutEntry { weapon: string; count: number }
 
+/** A squadron as the owner sees it (its unit on the map has the same id). */
 export interface Squadron {
   id: string;
   name: string;
   owner_player_id: string | null;
   airframe_id: string;
+  state: 'landed' | 'airborne';
   base_feature_id: string | null;
+  pos: Pos;
   aircraft: number;
   max_aircraft: number;
   damage: number;
   loadout: LoadoutEntry[];
+  ammo: Record<string, number>;
+  grounded: boolean;
+  grounded_until: number | null;
+  stranded: boolean;
+  return_salvo: number | null;
   radius_m: number;
   weight: number;
 }
 
-export interface AirBase { id: string; name: string; owner: string | null; capacity: number; used: number; pos: Pos }
+export interface AirBase { id: string; name: string; owner: string | null; capacity: number; used: number; pos: Pos; carrier: boolean }
 
 export interface AirAdmin {
+  roles: AirRole[];
   airframes: Airframe[];
   families: AirFamily[];
   weapons: AirWeapon[];
   squadrons: Squadron[];
   bases: AirBase[];
+  /** Sensors per side (team name, or player id without a team), for the coverage overlay. */
+  sensors: Record<string, { pos: Pos; range_m: number }[]>;
 }
 
-/** A player's view of air: own squadrons and bases in full; missiles as fit data; others as bands or recon. */
+export interface PlayerSquadron {
+  id: string; name: string; aircraft: number; max: number; damage: number; loadout: LoadoutEntry[]; ammo: Record<string, number>;
+  state: 'landed' | 'airborne'; base: string | null; base_name: string | null; pos: Pos; grounded: boolean; stranded: boolean;
+  return_salvo: number; radius_m: number; weight: number;
+  airframe: { id: string; name: string; role: string | null; tanker: boolean; refuelable: boolean; hp: number; speed_m: number; hardpoints: number;
+    max_payload: number; payload_penalty: number; families: string[]; radius_m: number; radar_m: number; cost_per_aircraft: number; sidc: string | null; asset_id: string | null };
+}
+
 export interface PlayerAir {
-  squadrons: {
-    id: string; name: string; aircraft: number; max: number; damage: number; loadout: LoadoutEntry[]; base: string | null; base_name: string | null;
-    base_pos: Pos | null; radius_m: number; weight: number;
-    airframe: { id: string; name: string; hp: number; hardpoints: number; max_payload: number; radius_m: number; radar_m: number; cost_per_aircraft: number; sidc: string | null; asset_id: string | null };
-  }[];
-  weapons: { id: string; name: string; family: string; family_color: string | null; tier: number; guidance: AirGuidance; range_m: number; weight: number; slots: number;
+  squadrons: PlayerSquadron[];
+  weapons: { id: string; name: string; family: string; family_id: string; family_color: string | null; tier: number; guidance: AirGuidance; range_m: number; weight: number; slots: number;
     targets: string[]; tech_item: string | null; unlocked: boolean }[];
-  bases: { id: string; name: string; capacity: number; used: number; pos: Pos }[];
-  radius_penalty: number;
-  patrol_radius_km: number;
-  patrol_radius_max_km: number;
-  recon_radius_km: number;
-  enemy_bases: { base: string; squadrons: string[] }[];
-  reveals: { center: Pos; radius_m: number }[];
-  revealed: Record<string, { type: string; strength: number; max: number }>;
-  revealed_squadrons: { base: string; name: string; airframe: string; aircraft: number; max: number }[];
+  bases: { id: string; name: string; capacity: number; used: number; pos: Pos; carrier: boolean }[];
+  settings: { refuel_radius_km: number; refuel_per_aircraft: number; tankers_refuel_tankers: boolean; land_snap_km: number; mutual_support_km: number; return_salvo: number };
+  /** Other sides' squadrons on this player's radar. */
+  enemy: Record<string, { airframe: string; role: string | null; state: 'landed' | 'airborne'; band: string }>;
+  /** This side's sensors (radar coverage at signature 1). */
+  sensors: { pos: Pos; range_m: number }[];
   squadron_items: { id: string; name: string; spawn_cost: number; airframe: string; size: number; unlocked: boolean }[];
 }

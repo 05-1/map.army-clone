@@ -5,7 +5,7 @@
 //
 // Every random number comes from a hash of (map, turn, engagement, round, salt, shot), so the same
 // inputs and salts always give the same result, and one engagement can be re-rolled on its own.
-import { resolveAir, type AirResult, type GroundTarget, type SquadronIn } from './air';
+import { finishAir, resolveAirCombat, type AirBaseIn, type AirResult, type AirState, type AirUnitIn, type GroundTarget } from './air';
 import type { Pos } from './types';
 
 // ---------------------------------------------------------------------------
@@ -39,11 +39,14 @@ export interface CombatSettings {
   terrain_min_km2: { urban: number; forest: number };
   hit_min: number;
   hit_max: number;
-  radius_penalty: number;
   dark_penalty: number;
-  patrol_radius_km: number;
-  patrol_radius_max_km: number;
-  recon_radius_km: number;
+  mutual_support_km: number;
+  refuel_radius_km: number;
+  refuel_per_aircraft: number;
+  tankers_refuel_tankers: boolean;
+  land_snap_km: number;
+  grounded_turns: number;
+  return_salvo: number;
 }
 
 /** Same values as private.combat_defaults() in setup.sql. */
@@ -55,8 +58,9 @@ export const DEFAULT_SETTINGS: CombatSettings = {
   intel_km: 100, band_fresh: 0.9, band_damaged: 0.6, band_heavy: 0.3,
   terrain: { open: 1.0, urban: 0.7, forest: 0.8 },
   terrain_min_km2: { urban: 25, forest: 50 },
-  hit_min: 5, hit_max: 95, radius_penalty: 0.4, dark_penalty: 0.5,
-  patrol_radius_km: 50, patrol_radius_max_km: 200, recon_radius_km: 25,
+  hit_min: 5, hit_max: 95, dark_penalty: 0.5,
+  mutual_support_km: 25, refuel_radius_km: 50, refuel_per_aircraft: 2, tankers_refuel_tankers: false,
+  land_snap_km: 5, grounded_turns: 1, return_salvo: 2,
 };
 
 export interface WeaponIn {
@@ -110,8 +114,8 @@ export interface CombatInputs {
   settings: CombatSettings;
   units: UnitIn[];
   engagements: EngagementIn[];
-  /** Air: squadrons with their missions this turn. */
-  squadrons?: SquadronIn[];
+  /** Air: squadrons (map units) at their final positions, with their declared attacks. */
+  air_units?: AirUnitIn[];
 }
 
 /** The owner's choices that shape a result: salts (re-rolls) and hand-edited damage per shot. */
@@ -205,7 +209,7 @@ export interface CombatResult {
   units: UnitOut[];
   engagements: EngagementOut[];
   log: { indirect: Phase | null; engagements: EngagementLog[]; failed: FailedAttack[] };
-  /** The air phase, resolved before ground combat. */
+  /** The air phase: exchanges, AA and strikes before ground combat; refuelling and forced returns after it. */
   air?: AirResult;
 }
 
@@ -351,13 +355,17 @@ export function resolveCombat(inputs: CombatInputs, data: PreviewData): CombatRe
   const failed: FailedAttack[] = [];
   const weaponOf = (u: Live, slot: number) => u.weapons.find((w) => w.slot === slot);
 
-  // ---- 0. Air: interceptions, SEAD and AA, strikes, recon. Ground combat then runs on what is left.
+  // ---- 0. Air: air-to-air, AA auto-fire, HARMs and strikes. Ground combat then runs on what is left.
+  let airState: AirState | undefined;
   let air: AirResult | undefined;
-  if (inputs.squadrons?.length) {
+  if (inputs.air_units?.length) {
     const roller = (salt: string) => ({ s, edits: data.edits, rand: (...parts: (string | number)[]) => rand01(inputs.map_id, inputs.turn, 'air', salt, ...parts) });
-    const targets = new Map([...units.values()].filter((u) => u.template.category === 'ground').map((u) => [u.id, u as unknown as GroundTarget]));
+    const targets = new Map([...units.values()].filter((u) => u.template.category !== 'air').map((u) => [u.id, u as unknown as GroundTarget]));
     for (const u of targets.values()) u.emit = u.emit ?? true;
-    air = resolveAir(inputs.squadrons, targets, roller(data.salt), (pkg) => roller(data.salts[pkg] ?? data.salt));
+    // Airbases and carriers at their final positions.
+    const bases: AirBaseIn[] = [...units.values()].filter((u) => (u.template.air_capacity ?? 0) > 0)
+      .map((u) => ({ id: u.id, name: u.name, owner: u.owner, side: u.side, pos: u.pos, capacity: u.template.air_capacity ?? 0 }));
+    airState = resolveAirCombat(inputs.air_units, bases, targets, roller(data.salt), (pkg) => roller(data.salts[pkg] ?? data.salt));
   }
 
   /** Fire one weapon. Damage is returned, not applied, so rounds can be simultaneous. */
@@ -552,6 +560,9 @@ export function resolveCombat(inputs: CombatInputs, data: PreviewData): CombatRe
     if (log.status === 'active' && sides() < 2) end('destroyed');
     return log;
   }
+
+  // ---- 3b. Air after ground combat: refuelling with surviving tankers, forced returns, rearming.
+  if (airState) air = finishAir(airState, (id) => (units.get(id)?.cur ?? 0) > 0, s);
 
   // ---- 4. End of turn: experience, stationary count, recovery.
   const active = new Set(logs.filter((l) => l.status === 'active').flatMap((l) => l.units.map((x) => x.fid)));

@@ -7,6 +7,7 @@ export interface LoadoutWeapon {
   id: string;
   name: string;
   family: string;
+  family_id?: string;
   family_color: string | null;
   tier: number;
   guidance: AirGuidance;
@@ -18,6 +19,10 @@ export interface LoadoutWeapon {
 }
 
 export interface LoadoutFrame { name: string; hardpoints: number; max_payload: number; radius_m: number }
+
+/** Only the missiles of the families this airframe can carry. */
+export const forFrame = <W extends { family_id?: string }>(weapons: W[], families: readonly string[] | undefined) =>
+  weapons.filter((w) => !families || !w.family_id || families.includes(w.family_id));
 
 export const GUIDANCE_TEXT: Record<AirGuidance, string> = {
   radar: 'radar-guided (beats ECM)', ir: 'heat-seeking (beats flares)', harm: 'anti-radiation (emitting radar AA only)', agm: 'air-to-ground (vs active protection)', none: 'unguided',
@@ -79,7 +84,7 @@ export function LoadoutEditor({ frame, weapons, value, onChange, penalty, readOn
           </ul>
         </div>
       ))}
-      <p className="tip">Per aircraft. Changing a loadout is free and instant, and missiles refill every mission. Heavier loads shorten the radius.</p>
+      <p className="tip">Per aircraft. Change it only while landed: free and instant, and the squadron rearms to it. Missiles fired in the air are gone until it lands again. Heavier loads shorten the radius.</p>
     </div>
   );
 }

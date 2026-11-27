@@ -1,6 +1,7 @@
-// End-to-end run of air combat through the real UI and the real setup.sql:
-// owner builds an airbase template, missiles, an airframe and a squadron -> the player loads missiles,
-// plans a strike and buys a replacement -> owner previews and pushes -> reports on both sides.
+// End-to-end run of air combat (v2: squadrons on the map) through the real UI and the real setup.sql:
+// owner sets up an airbase template with a radar, real-world missiles and an airframe preset, a squadron ->
+// the player loads missiles while landed, flies the squadron next to an enemy unit and declares a salvo ->
+// owner previews and pushes -> the squadron is airborne with missiles spent, the enemy's radar now shows it.
 //   node tests/e2e/air.mjs <screenshot dir>
 import { launch, B } from './lib.mjs';
 const { sql } = await import('./fake-supabase.mjs');
@@ -17,54 +18,64 @@ const step = async (name, fn) => { if (failed) return; try { await fn(); } catch
 const ed = await open();
 let C;
 const at = (dx, dy) => [C.x + dx, C.y + dy];
+// Close together at zoom +4: about 150 km apart.
 const UB = [-200, 60], UR = [-80, 60];
 const dlg = () => ed.locator('.dialog');
 const field = (label) => dlg().locator('label.field', { hasText: label }).locator('input, select, textarea').first();
 
-await step('owner places a base and a tank, makes them airbase-capable', async () => {
+await step('owner zooms in, sets the start view, places a base and an enemy unit', async () => {
   await ed.goto(B + '/'); await wait(ed, 1200);
   await ed.fill('input[type=email]', 'owner@example.com'); await ed.fill('input[type=password]', 'correct horse battery');
   await ed.getByRole('button', { name: 'Create account' }).click(); await wait(ed, 1200);
   const claim = ed.getByRole('button', { name: /claim/i });
   if (await claim.count()) await claim.first().click();
   await ed.waitForSelector('.topbar', { timeout: 15000 }); await wait(ed, 2500);
+  for (let i = 0; i < 4; i++) { await ed.locator('.maplibregl-ctrl-zoom-in').first().click(); await wait(ed, 400); }
+  await wait(ed, 800);
+  await ed.getByRole('button', { name: /Set start view/ }).click(); await wait(ed, 800);
   const box = await ed.locator('.stage').boundingBox(); C = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
   await ed.keyboard.press('s'); await ed.mouse.click(...at(...UB)); await wait(ed, 250); await ed.mouse.click(...at(...UR)); await wait(ed, 250);
   await ed.keyboard.press('Escape'); await ed.keyboard.press('Escape'); await wait(ed, 1500);
+  check('two units on the map', (await sql('select count(*)::int n from public.features'))[0].n === 2);
+});
+
+await step('Combat: an airbase template with a 50 km radar', async () => {
   await ed.getByRole('button', { name: 'Combat', exact: true }).click(); await wait(ed, 900);
   await dlg().getByRole('tab', { name: 'Settings' }).click(); await wait(ed, 300);
   await field('Intel range').fill('9000');
   await dlg().getByRole('button', { name: /Save from turn/ }).click(); await wait(ed, 900);
   await dlg().getByRole('tab', { name: 'Unit templates' }).click(); await wait(ed, 300);
   await dlg().getByRole('button', { name: 'New template' }).click();
-  await field('Name').fill('Base'); await field('Max strength').fill('1000'); await field('Armor').fill('5');
+  await field('Name').fill('Base'); await field('Max strength').fill('20000'); await field('Armor').fill('5');
   await field('Airbase: squadrons it can hold').fill('2');
+  await field('Radar / early warning range').fill('50');
   await dlg().getByRole('button', { name: 'Save', exact: true }).click(); await wait(ed, 900);
-  const t = (await sql('select name, air_capacity from public.unit_templates'))[0];
-  check('template is an airbase for 2 squadrons', t?.air_capacity === 2, JSON.stringify(t));
+  const t = (await sql('select name, air_capacity, sensor_m from public.unit_templates'))[0];
+  check('template: airbase for 2 squadrons with a 50 km radar', t?.air_capacity === 2 && t.sensor_m === 50000, JSON.stringify(t));
   await ed.keyboard.press('Escape'); await wait(ed, 400);
 });
 
-await step('Air window: missile families, an AGM tier, an airframe', async () => {
+await step('Air window: roles, real-world missiles in their own tree, an airframe preset', async () => {
   await ed.getByRole('button', { name: 'Air', exact: true }).click(); await wait(ed, 900);
+  await dlg().getByRole('tab', { name: 'Roles' }).click(); await wait(ed, 300);
+  check('four standard roles', /Fighter[\s\S]*Multirole[\s\S]*Bomber[\s\S]*Tanker/.test(await dlg().innerText()));
   await dlg().getByRole('tab', { name: 'Missiles' }).click(); await wait(ed, 300);
   await dlg().getByRole('button', { name: /Add IR, ARH, HARM and AGM/ }).click(); await wait(ed, 1200);
-  await dlg().locator('.setgrp', { hasText: 'AGM' }).getByRole('button', { name: '+ tier' }).click(); await wait(ed, 300);
-  await field('Name').fill('Maverick'); await field('Damage per hit').fill('20'); await field('AP (vs ground armor)').fill('5');
-  await dlg().getByRole('button', { name: 'Save', exact: true }).click(); await wait(ed, 1200);
-  const w = (await sql(`select w.name, w.tier, w.damage, t.category from public.air_weapons w left join public.tech_items t on t.id = w.tech_item_id`))[0];
-  check('missile tier saved with its tech-tree node', w?.name === 'Maverick' && w.tier === 1 && w.category === 'weapon', JSON.stringify(w));
+  await dlg().getByRole('button', { name: /Add real-world missiles/ }).click(); await wait(ed, 4000);
+  const w = await sql(`select w.name, t.tree from public.air_weapons w join public.tech_items t on t.id = w.tech_item_id order by w.name`);
+  check('ten missiles, each a node in the missile tree', w.length === 10 && w.every((x) => x.tree === 'missiles'), w.map((x) => x.name).join(', '));
   await shot(ed, 'a10-missiles');
   await dlg().getByRole('tab', { name: 'Airframes' }).click(); await wait(ed, 300);
-  await dlg().getByRole('button', { name: 'New airframe' }).click();
-  await field('Name').fill('F-16'); await field('Combat radius, empty').fill('20000'); await field('SP per replacement aircraft').fill('5');
+  await dlg().getByLabel('Start from a real aircraft').selectOption({ label: 'F-16C Block 50 (Multirole)' }); await wait(ed, 300);
+  check('preset fills real figures', (await field('Speed: max move per turn').inputValue()) === '4200' && (await field('Combat radius, empty').inputValue()) === '900');
   await dlg().getByRole('button', { name: 'Save', exact: true }).click(); await wait(ed, 1200);
-  check('airframe saved', (await sql(`select count(*)::int n from public.airframes where name = 'F-16'`))[0].n === 1);
+  const af = (await sql(`select name, speed_m, cardinality(families) n from public.airframes`))[0];
+  check('airframe saved with its role and all four families', af?.name === 'F-16C Block 50' && af.n === 4, JSON.stringify(af));
   await shot(ed, 'a11-airframe');
   await ed.keyboard.press('Escape'); await wait(ed, 400);
 });
 
-await step('players, assignment, turn, squadron for Blue', async () => {
+await step('players, assignment, turn, a squadron for Blue at its base', async () => {
   await ed.getByRole('button', { name: 'Players', exact: true }).click(); await wait(ed);
   for (const [n, t] of [['Blue', 'Blue'], ['Red', 'Red']]) {
     await ed.getByPlaceholder('e.g. Alex').fill(n); await ed.getByPlaceholder('e.g. Blue').fill(t);
@@ -86,10 +97,9 @@ await step('players, assignment, turn, squadron for Blue', async () => {
   await field('Player').selectOption({ label: 'Blue' });
   const base = field('Base');
   await base.selectOption({ label: await base.locator('option', { hasText: 'Blue' }).first().textContent() });
-  await field('Aircraft').fill('10'); await field('Full strength').fill('12');
   await dlg().getByRole('button', { name: 'Save', exact: true }).click(); await wait(ed, 1200);
-  const q = (await sql(`select q.name, q.aircraft, p.name player from public.squadrons q join public.players p on p.id = q.owner_player_id`))[0];
-  check('squadron based at Blue\'s airbase', q?.name === 'Vipers' && q.aircraft === 10 && q.player === 'Blue', JSON.stringify(q));
+  const q = (await sql(`select f.props ->> 'name' n, q.aircraft, q.state, p.name player from public.air_units q join public.features f on f.id = q.feature_id join public.players p on p.id = f.owner_player_id`))[0];
+  check('squadron is a unit on the map, landed at Blue\'s airbase', q?.n === 'Vipers' && q.aircraft === 12 && q.state === 'landed' && q.player === 'Blue', JSON.stringify(q));
   await shot(ed, 'a12-squadron');
   await ed.keyboard.press('Escape'); await wait(ed, 400);
 });
@@ -97,61 +107,67 @@ await step('players, assignment, turn, squadron for Blue', async () => {
 const pc = { x: 640, y: 400 };
 const pat = (dx, dy) => [pc.x + dx, pc.y + dy];
 const tok = async (name) => (await sql(`select invite_token from public.players where name = $1`, [name]))[0].invite_token;
-await step('Blue loads missiles, plans a strike, buys a replacement', async () => {
-  await sql(`update public.players set spawn_points = 20 where name = 'Blue'`);   // the Players window sets this; covered by the tech test
+const vipers = async () => (await sql(`select q.*, f.geometry from public.air_units q join public.features f on f.id = q.feature_id`))[0];
+await step('Blue loads missiles while landed, flies next to the enemy and declares a salvo', async () => {
   blue = await open(1280, 800);
   await blue.goto(`${B}/play.html#${await tok('Blue')}`); await blue.waitForSelector('.ppanel', { timeout: 15000 }); await wait(blue, 2500);
-  const card = blue.locator('.sqcard', { hasText: 'Vipers' });
-  check('squadron card shows strength and type', /10 \/ 12 aircraft/.test(await card.innerText()) && /F-16/.test(await card.innerText()));
-  await card.getByRole('button', { name: 'Loadout' }).click(); await wait(blue, 400);
+  await blue.locator('.ppanel').getByRole('button', { name: /Vipers/ }).click(); await wait(blue, 500);
+  const det = await blue.locator('.details').innerText();
+  check('details: aircraft, landed, reach', /12 \/ 12 F-16C/.test(det) && /Landed at/.test(det) && /4,200 km a turn/.test(det), det.replace(/\s+/g, ' ').slice(0, 300));
+  await blue.locator('.details').getByRole('button', { name: 'Change loadout' }).click(); await wait(blue, 400);
   const lo = await blue.locator('.dialog').innerText();
-  check('loadout window hides accuracy and damage', /Maverick/.test(lo) && !/accuracy|damage per hit|\bAP\b/i.test(lo), lo.replace(/\s+/g, ' ').slice(0, 200));
-  await blue.getByRole('button', { name: 'One more Maverick' }).click(); await blue.getByRole('button', { name: 'One more Maverick' }).click();
+  check('loadout hides accuracy and damage; only researched tier 1 can be loaded', /AGM-65 Maverick/.test(lo) && !/accuracy|damage per hit|\bAP\b/i.test(lo) && /research it/i.test(lo), (lo.match(/.{0,40}(accuracy|damage per hit|\bAP\b).{0,40}/i) ?? [''])[0]);
+  await blue.getByRole('button', { name: 'One more AGM-65 Maverick' }).click(); await blue.getByRole('button', { name: 'One more AGM-65 Maverick' }).click();
   await shot(blue, 'a20-loadout');
   await blue.getByRole('button', { name: 'Save loadout' }).click(); await wait(blue, 1500);
-  const l = (await sql(`select loadout from public.squadrons`))[0].loadout;
-  check('loadout saved at once', l.length === 1 && l[0].count === 2, JSON.stringify(l));
-  await card.getByRole('button', { name: 'Strike', exact: true }).click(); await wait(blue, 300);
-  await blue.mouse.click(...pat(...UR)); await wait(blue, 500);
-  await card.getByRole('button', { name: 'One more replacement for Vipers' }).click(); await wait(blue, 2500);
+  const q = await vipers();
+  check('loadout saved and the squadron rearmed', q.loadout[0]?.count === 2 && Object.values(q.ammo)[0] === 24, JSON.stringify(q.ammo));
+  // Fly: drag the squadron off its base to just short of the enemy unit.
+  await blue.mouse.move(...pat(...UB)); await blue.mouse.down(); await blue.mouse.move(...pat(UR[0] - 15, UR[1]), { steps: 12 }); await blue.mouse.up(); await wait(blue, 800);
+  await blue.locator('.details').getByRole('button', { name: 'Add a target' }).click(); await wait(blue, 200);
+  await blue.mouse.click(...pat(...UR)); await wait(blue, 2500);
   const d = (await sql(`select changes from public.drafts`))[0]?.changes ?? [];
-  check('strike and replacement in the saved draft', d.some((c) => c.op === 'mission' && c.payload.type === 'strike' && c.payload.target_unit) && d.some((c) => c.op === 'buy_aircraft' && c.payload.count === 1), JSON.stringify(d));
-  const draftText = await blue.locator('.ppanel').innerText();
-  check('draft lists the mission in words', /Strike .*Vipers/.test(draftText), draftText.replace(/\s+/g, ' ').slice(0, 400));
+  const c = d.find((x) => x.op === 'update' && x.payload.air_attacks);
+  check('move and salvo in the saved draft (all 24 Mavericks)', !!c?.payload.geometry && c.payload.air_attacks[0].weapons[0].count === 24, JSON.stringify(d).slice(0, 300) + ' ' + (await blue.locator('.toast').allTextContents()).join(' '));
+  const det2 = await blue.locator('.details').innerText();
+  check('details list the attack with its salvo', /Attacks this turn/.test(det2) && /AGM-65 Maverick/.test(det2), det2.replace(/\s+/g, ' ').slice(0, 400));
+  await blue.locator('.details').getByRole('button', { name: /One fewer AGM-65 Maverick/ }).click(); await wait(blue, 2000);
+  const d2 = (await sql(`select changes from public.drafts`))[0]?.changes ?? [];
+  check('salvo trimmed to 23', d2.find((x) => x.payload?.air_attacks)?.payload.air_attacks[0].weapons[0].count === 23);
   await shot(blue, 'a21-strike');
   await blue.getByRole('button', { name: /Mark my draft ready/ }).click(); await wait(blue, 1200);
 });
 
-await step('owner previews the air phase and pushes', async () => {
+await step('owner previews the air phase shot by shot and pushes', async () => {
   await ed.reload(); await ed.waitForSelector('.topbar'); await wait(ed, 2500);
   await ed.getByRole('button', { name: /^Turn/ }).click(); await wait(ed);
   await ed.getByRole('button', { name: 'Lock for review' }).click(); await wait(ed, 1200);
   await ed.getByRole('button', { name: 'Resolve combat (preview)' }).click(); await wait(ed, 2000);
-  const prev = await ed.locator('.dialog, .right').first().innerText().catch(() => '');
   const all = await ed.locator('body').innerText();
-  check('air section in the preview with the strike', /Strike by Vipers on/.test(all) && /Vipers/.test(all), (prev || all).replace(/\s+/g, ' ').slice(0, 300));
-  const show = ed.getByRole('button', { name: 'Show shots' }).first();
-  if (await show.count()) { await show.click(); await wait(ed, 300); }
+  check('air section with the strike package', /Strike by Vipers/.test(all), all.replace(/\s+/g, ' ').slice(0, 200));
+  await ed.getByRole('button', { name: 'Show shots' }).first().click(); await wait(ed, 300);
   check('per-shot hit chance and roll shown', /=\s*\d+%/.test(await ed.locator('body').innerText()));
   await shot(ed, 'a30-preview');
   await ed.getByRole('button', { name: 'Push turn' }).click(); await wait(ed, 3500);
-  const q = (await sql(`select aircraft from public.squadrons`))[0];
-  check('replacement arrived at push', q.aircraft === 11, JSON.stringify(q));
+  const q = await vipers();
+  check('squadron airborne where it was flown, missiles spent', q.state === 'airborne' && Object.values(q.ammo)[0] < 24, JSON.stringify({ state: q.state, ammo: q.ammo }));
   const st = (await sql(`select s.strength from public.unit_state s join public.features f on f.id = s.feature_id join public.players p on p.id = f.owner_player_id where p.name = 'Red'`))[0];
-  check('strike damaged the Red unit', st && st.strength < 1000, JSON.stringify(st));
+  check('strike damaged the Red unit', st && st.strength < 20000, JSON.stringify(st));
 });
 
-await step('Blue reads the air report; Red sees the airbase only as bands', async () => {
-  await blue.reload(); await blue.waitForSelector('.ppanel', { timeout: 15000 }); await wait(blue, 2500);
-  const panel = await blue.locator('.ppanel').innerText();
-  check('Blue report has the strike result', /Vipers → /.test(panel) && /hits/.test(panel), panel.replace(/\s+/g, ' ').slice(-400));
-  await shot(blue, 'a40-blue-report');
+await step('Red now sees the squadron on its radar (type and band only); Blue reads its report', async () => {
   red = await open(1280, 800);
   await red.goto(`${B}/play.html#${await tok('Red')}`); await red.waitForSelector('.ppanel', { timeout: 15000 }); await wait(red, 2500);
-  await red.mouse.click(...pat(...UB)); await wait(red, 500);
+  await red.mouse.click(...pat(UR[0] - 15, UR[1])); await wait(red, 600);
   const det = await red.locator('.details').innerText();
-  check('enemy airbase shows squadron bands, not numbers', /Airbase with 1 squadron/.test(det) && !/11 \/ 12/.test(det), det.replace(/\s+/g, ' ').slice(0, 200));
-  await shot(red, 'a41-red-intel');
+  check('enemy squadron on the radar: type and band, no numbers', /Enemy squadron on your radar/.test(det) && /F-16C/.test(det) && !/\d+ \/ 12/.test(det), det.replace(/\s+/g, ' ').slice(0, 300));
+  await shot(red, 'a41-red-radar');
+  await blue.reload(); await blue.waitForSelector('.ppanel', { timeout: 15000 }); await wait(blue, 2500);
+  const panel = await blue.locator('.ppanel').innerText();
+  check('Blue report has the strike result', /Vipers → /.test(panel) && /hit/.test(panel), panel.replace(/\s+/g, ' ').slice(-400));
+  await blue.locator('.ppanel').getByRole('button', { name: /Vipers/ }).click(); await wait(blue, 500);
+  check('airborne squadron: missiles left, no loadout changes in the air', /Missiles left/.test(await blue.locator('.details').innerText()));
+  await shot(blue, 'a40-blue-report');
 });
 
 console.log(JSON.stringify({ failed: results.filter((r) => r[0] === 'FAIL').length, of: results.length, errors }, null, 1));

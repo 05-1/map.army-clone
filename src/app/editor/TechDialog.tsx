@@ -104,10 +104,12 @@ function TreeTab({ backend, map, busy, run }: { backend: Backend; map: MapMeta; 
   const airframes = (air?.airframes ?? []).filter((a) => !a.deleted_at);
   const families = air?.families ?? [];
   const airWeapons = air?.weapons ?? [];
+  const [tree, setTree] = useState<'main' | 'missiles'>('main');
   const [filter, setFilter] = useState('all');
   const familyOf = (techId: string) => airWeapons.find((w) => w.tech_item_id === techId)?.family_id;
-  const shown = items.filter((it) => filter === 'all' || (filter === 'ground' ? it.category === 'unit' || it.category === 'building'
-    : filter === 'squadron' ? it.category === 'squadron' : filter === 'missiles' ? it.category === 'weapon' : familyOf(it.id) === filter));
+  const inTree = items.filter((it) => (it.tree ?? 'main') === tree);
+  const shown = inTree.filter((it) => filter === 'all' || (tree === 'missiles' ? familyOf(it.id) === filter
+    : filter === 'ground' ? it.category === 'unit' || it.category === 'building' : it.category === 'squadron'));
   const assets = useEd((s) => s.assets);
   const symbolDraft = useEd((s) => s.symbolDraft);
   const [edit, setEdit] = useState<TechItem | null>(null);
@@ -187,13 +189,19 @@ function TreeTab({ backend, map, busy, run }: { backend: Backend; map: MapMeta; 
           </small>
         </div>
         <div className="row2 wrap">
+          <div className="seg" role="group" aria-label="Tree">
+            <button type="button" className={tree === 'main' ? 'on' : ''} onClick={() => (setTree('main'), setFilter('all'))}>Main tree</button>
+            <button type="button" className={tree === 'missiles' ? 'on' : ''} onClick={() => (setTree('missiles'), setFilter('all'))}>Missile tree</button>
+          </div>
           <Field label="Show">
             <select value={filter} onChange={(e) => setFilter(e.target.value)}>
-              <option value="all">Everything</option>
-              <option value="ground">Units and buildings</option>
-              <option value="squadron">Squadrons</option>
-              <option value="missiles">All missiles</option>
-              {families.filter((f) => !f.deleted_at).map((f) => <option key={f.id} value={f.id}>{f.name} missiles</option>)}
+              <option value="all">Everything in this tree</option>
+              {tree === 'main' ? (
+                <>
+                  <option value="ground">Units and buildings</option>
+                  <option value="squadron">Squadrons (airframes)</option>
+                </>
+              ) : families.filter((f) => !f.deleted_at).map((f) => <option key={f.id} value={f.id}>{f.name} family</option>)}
             </select>
           </Field>
         </div>

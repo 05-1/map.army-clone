@@ -67,7 +67,9 @@ function StyleFields(p: { style: Partial<Style>; set: (s: Partial<Style>) => voi
   );
 }
 
-export function PropertiesPanel({ onAssign, backend, refreshCombat }: { onAssign?: (ids: string[], playerId: string | null) => void; backend?: Backend; refreshCombat?: () => Promise<void> }) {
+export function PropertiesPanel({ onAssign, backend, refreshCombat, onSquadron }: {
+  onAssign?: (ids: string[], playerId: string | null) => void; backend?: Backend; refreshCombat?: () => Promise<void>; onSquadron?: (id: string) => void;
+}) {
   const features = useEd((s) => s.features);
   const selection = useEd((s) => s.selection);
   const layers = useEd((s) => s.layers);
@@ -75,6 +77,7 @@ export function PropertiesPanel({ onAssign, backend, refreshCombat }: { onAssign
   const players = useEd((s) => s.players);
   const techItems = useEd((s) => s.bundle?.economy.items);
   const combat = useEd((s) => s.combat);
+  const air = useEd((s) => s.air);
   const nameRef = useRef<HTMLTextAreaElement>(null);
   const st = useEd.getState;
 
@@ -92,6 +95,8 @@ export function PropertiesPanel({ onAssign, backend, refreshCombat }: { onAssign
   if (!sel.length) return null;
   const ids = sel.map((f) => f.id);
   const one = sel.length === 1 ? sel[0] : null;
+  const squadron = one ? air?.squadrons.find((q) => q.id === one.id) : undefined;
+  const airframeName = squadron ? air?.airframes.find((a) => a.id === squadron.airframe_id)?.name ?? '' : '';
   const kind = common(sel, (f) => f.kind);
   const cp = () => st().checkpoint();
   const setP = (p: Partial<Props>) => st().patch(ids, (f) => ({ ...f, props: { ...f.props, ...p } }));
@@ -188,7 +193,15 @@ export function PropertiesPanel({ onAssign, backend, refreshCombat }: { onAssign
           </select>
         </Field>
       )}
-      {combat && sel.every((f) => f.kind === 'symbol' || f.kind === 'asset') && (
+      {squadron && one && (
+        <div className="sqcard">
+          <strong>Squadron: {airframeName}</strong>
+          <small>{squadron.aircraft}/{squadron.max_aircraft} aircraft · {squadron.state === 'landed' ? (squadron.base_feature_id ? 'landed' : 'stranded') : 'airborne'}
+            {squadron.grounded ? ' · grounded' : ''} · radius {Math.round(squadron.radius_m / 1000)} km</small>
+          {onSquadron && <button type="button" className="btn sm" onClick={() => onSquadron(one.id)}>Edit squadron (aircraft, ammo, base, grounded)</button>}
+        </div>
+      )}
+      {combat && !squadron && sel.every((f) => f.kind === 'symbol' || f.kind === 'asset') && (
         <CombatFields ids={ids} sel={sel} combat={combat} backend={backend} refresh={refreshCombat} setP={setP} cp={cp} />
       )}
       <Field label="Time" wide>

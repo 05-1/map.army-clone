@@ -99,19 +99,8 @@ export function ghostFeatures(changes: Change[], live: Feature[], color = '#f2a9
 const nameOf = (f: Feature | undefined) => clip(f?.props.name?.split('\n')[0] || (f ? KIND_NAME[f.kind] : 'unknown object'), 40);
 
 /** One line per change, for lists. Pass the tech tree to name research and purchases. */
-export const MISSION_NAME = { strike: 'Strike', patrol: 'Patrol', escort: 'Escort', recon: 'Recon' } as const;
-
 export function describeChange(c: Change, live: Map<string, Feature>, tech: readonly TechItem[] = [], squadronName: (id: string) => string = () => 'squadron'): string {
-  if (c.op === 'mission') {
-    const p = c.payload;
-    const where = p.type === 'strike' ? ` on ${nameOf(live.get(p.target_unit ?? ''))}` : p.type === 'escort' ? ` for ${squadronName(p.escort_of ?? '')}` : '';
-    return `${MISSION_NAME[p.type]}${where}: ${squadronName(c.feature_id)}`;
-  }
   if (c.op === 'buy_aircraft') return `Buy ${c.payload.count} aircraft for ${squadronName(c.payload.squadron)}`;
-  if (c.op === 'buy_squadron') {
-    const it = tech.find((x) => x.id === c.payload.purchase_id);
-    return `Raise a new squadron${c.payload.name ? ` "${clip(c.payload.name, 30)}"` : ''}: ${it?.name ?? 'squadron'}${it?.spawn_cost ? ` (${it.spawn_cost} spawn)` : ''}`;
-  }
   if (c.op === 'research') {
     const it = tech.find((x) => x.id === c.feature_id);
     return `Research ${it ? clip(it.name, 40) : 'unknown item'}${it?.research_cost ? ` (${it.research_cost} research)` : ''}`;
@@ -133,6 +122,13 @@ export function describeChange(c: Change, live: Map<string, Feature>, tech: read
     parts.push(`${parts.length ? 'attack' : 'Attack'} ${targets}`);
   }
   if (c.payload.retreat) parts.push(parts.length ? 'retreat' : 'Retreat');
+  if (c.payload.air_attacks?.length) {
+    const n = c.payload.air_attacks.reduce((x, a) => x + a.weapons.reduce((y, w) => y + w.count, 0), 0);
+    parts.push(`${parts.length ? 'attack' : 'Attack'} ${c.payload.air_attacks.map((a) => nameOf(live.get(a.target))).join(', ')} (${n} missile${n === 1 ? '' : 's'})`);
+  }
+  if (c.payload.return_salvo != null) parts.push(`${parts.length ? 'return' : 'Return'} fire ${c.payload.return_salvo}/aircraft`);
+  if (c.payload.refuel_priority?.length) parts.push(parts.length ? 'refuelling order' : 'Refuelling order');
+  if (c.payload.emit != null) parts.push(`${parts.length ? 'radar' : 'Radar'} ${c.payload.emit ? 'on' : 'dark'}`);
   return `${parts.join(', ') || 'Change'}: ${nameOf(f)}`;
 }
 
@@ -142,16 +138,14 @@ export function summarize(changes: Change[]): string {
   const add = (k: string) => n.set(k, (n.get(k) ?? 0) + 1);
   for (const c of changes) {
     if (c.op === 'research') add('research');
-    else if (c.op === 'mission') add('air mission');
     else if (c.op === 'buy_aircraft') add('aircraft order');
-    else if (c.op === 'buy_squadron') add('new squadron');
     else if (c.op === 'create') add(c.payload.purchase_id ? 'purchase' : `new ${KIND_NAME[c.payload.kind]}`);
     else if (c.op === 'delete') add('removal');
     else {
       if (c.payload.geometry) add('move');
       else if (c.payload.heading != null) add('turn');
       if (c.payload.order) add('order');
-      if (c.payload.attacks?.length) add('attack order');
+      if (c.payload.attacks?.length || c.payload.air_attacks?.length) add('attack order');
       if (c.payload.retreat) add('retreat');
     }
   }

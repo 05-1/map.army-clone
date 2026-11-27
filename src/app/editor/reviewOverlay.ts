@@ -21,7 +21,7 @@ export class ReviewOverlay {
   constructor(private map: MlMap, urlFor: (a: Asset) => string, private onCommit: (playerId: string) => void) {
     this.renderer = new SceneRenderer(map, urlFor, { source: 'ghost', prefix: 'gh', opacity: 0.62 });
     this.unsub = useEd.subscribe((s, p) => {
-      if (s.air !== p.air || s.review !== p.review || s.bundle !== p.bundle || s.showDrafts !== p.showDrafts || s.viewing !== p.viewing
+      if (s.air !== p.air || s.airCoverage !== p.airCoverage || s.selection !== p.selection || s.review !== p.review || s.bundle !== p.bundle || s.showDrafts !== p.showDrafts || s.viewing !== p.viewing
         || s.features !== p.features || s.assets !== p.assets || s.players !== p.players) this.draw();
     });
     map.on('mousedown', this.onDown);
@@ -54,6 +54,22 @@ export class ReviewOverlay {
       const color = z.player_id ? colorOf(z.player_id) : z.team ? s.players.find((p) => p.team === z.team)?.color ?? DEFAULT_COLOR : '#ffffff';
       zoneParts(z.zone).forEach((g, i) => extra(`spawn~${z.id}~${i}`, 'polygon', g, {}, { color, width: 1.5, dash: 'dot', fillOpacity: 0.05 }));
     }
+    // Air, always: the selected squadron's reach (speed from where it stands; its combat radius around each of its
+    // owner's bases), and one side's radar coverage when picked (range at signature 1).
+    if (s.air) {
+      const q = s.selection.length === 1 ? s.air.squadrons.find((x) => x.id === s.selection[0]) : undefined;
+      const af = q && s.air.airframes.find((x) => x.id === q.airframe_id);
+      if (q && af) {
+        const color = colorOf(q.owner_player_id);
+        extra(`reach~${q.id}`, 'circle', { type: 'Point', coordinates: q.pos }, { radius: af.speed_m }, { color: '#35c7f0', width: 1.5, dash: 'dash', fillOpacity: 0 });
+        for (const base of s.air.bases.filter((x) => x.owner === q.owner_player_id)) {
+          extra(`cover~${q.id}~${base.id}`, 'circle', { type: 'Point', coordinates: base.pos }, { radius: q.radius_m }, { color, width: 1.5, dash: 'dot', fillOpacity: 0.04 });
+        }
+      }
+      for (const [i, sen] of (s.airCoverage ? s.air.sensors[s.airCoverage] ?? [] : []).entries()) {
+        extra(`radar~${i}`, 'circle', { type: 'Point', coordinates: sen.pos }, { radius: sen.range_m }, { color: '#ffd60a', width: 1, dash: 'dot', fillOpacity: 0.06 });
+      }
+    }
     if (!b.turn || !s.showDrafts) return this.renderer.update(GHOST_LAYERS, out, assets);
     for (const a of b.allocations) {
       if (!a.zone) continue;
@@ -83,24 +99,24 @@ export class ReviewOverlay {
         }
       }
     }
-    // Air missions: route from the squadron's base, patrol and recon circles.
-    const air = s.air;
-    if (air) {
+    // Air: declared attacks from each squadron's final position, and the refuel circles of airborne tankers.
+    if (s.air) {
       for (const d of accepted) {
         const color = colorOf(d.player_id);
         for (const c of d.changes) {
-          if (c.op !== 'mission') continue;
-          const q = air.squadrons.find((x) => x.id === c.feature_id);
-          const base = air.bases.find((x) => x.id === q?.base_feature_id)?.pos;
-          const strikeOf = (id: string) => d.changes.find((x) => x.op === 'mission' && x.feature_id === id);
-          const tgtOf = (p: typeof c.payload): Pos | null => p.type === 'strike' ? finalPos(p.target_unit ?? '') : p.type === 'escort' ? (() => { const st = strikeOf(p.escort_of ?? ''); return st?.op === 'mission' ? tgtOf(st.payload) : null; })() : p.target ?? null;
-          const to = tgtOf(c.payload);
-          if (!base || !to) continue;
-          extra(`air~${c.feature_id}`, 'arrow', { type: 'LineString', coordinates: [base, to] }, {}, { color, width: 2, dash: 'dot' });
-          const sett = s.combat?.settings;
-          if (c.payload.type === 'patrol') extra(`airp~${c.feature_id}`, 'circle', { type: 'Point', coordinates: to }, { radius: c.payload.radius_m ?? (sett?.patrol_radius_km ?? 50) * 1000 }, { color, width: 1.5, dash: 'dash', fillOpacity: 0.05 });
-          if (c.payload.type === 'recon') extra(`airr~${c.feature_id}`, 'circle', { type: 'Point', coordinates: to }, { radius: (sett?.recon_radius_km ?? 25) * 1000 }, { color, width: 1.5, dash: 'dot', fillOpacity: 0.03 });
+          if (c.op !== 'update' || !c.payload.air_attacks?.length) continue;
+          const from = finalPos(c.feature_id);
+          for (const a of c.payload.air_attacks) {
+            const to = finalPos(a.target);
+            if (from && to) extra(`aatk~${c.feature_id}~${a.target}`, 'arrow', { type: 'LineString', coordinates: [from, to] }, {}, { color, width: 2, dash: 'dot' });
+          }
         }
+      }
+      const radius = (s.combat?.settings.refuel_radius_km ?? 50) * 1000;
+      for (const q of s.air.squadrons) {
+        if (q.state !== 'airborne' || !s.air.airframes.find((x) => x.id === q.airframe_id)?.tanker) continue;
+        const at = finalPos(q.id);
+        if (at) extra(`refuel~${q.id}`, 'circle', { type: 'Point', coordinates: at }, { radius }, { color: colorOf(q.owner_player_id), width: 1.5, dash: 'dash', fillOpacity: 0.04 });
       }
     }
     for (const c of findConflicts(s.features, accepted, b.turn.conflict_m)) {

@@ -26,6 +26,9 @@ export function ShareDialog({ backend, map, flush, onClose }: { backend: Backend
   const [hours, setHours] = useState<number | null>(null);
   const [allLayers, setAllLayers] = useState(true);
   const [picked, setPicked] = useState<Set<string>>(() => new Set(layers.map((l) => l.id)));
+  const [airPicture, setAirPicture] = useState('none');
+  const teams = [...new Set(useEd((s) => s.players).filter((p) => !p.revoked && p.team).map((p) => p.team!))];
+  const pictureText = (v: string) => (v === 'all' ? 'all squadrons' : v === 'none' ? 'no squadrons' : `squadrons ${v.slice(5)} sees`);
 
   const run = async (fn: () => Promise<void>) => {
     setError('');
@@ -52,7 +55,7 @@ export function ShareDialog({ backend, map, flush, onClose }: { backend: Backend
       // A snapshot must capture what is on screen, so push pending edits first.
       await flush();
       await backend.createLink(map.id, {
-        mode, label,
+        mode, label, airPicture,
         visibleLayers: allLayers ? null : [...picked],
         expiresAt: hours ? new Date(Date.now() + hours * 3600_000).toISOString() : null,
       });
@@ -116,6 +119,13 @@ export function ShareDialog({ backend, map, flush, onClose }: { backend: Backend
                   ))}
                 </div>
               )}
+              <Field label="Air picture: which squadrons viewers see">
+                <select value={airPicture} onChange={(e) => setAirPicture(e.target.value)}>
+                  <option value="none">None (no aircraft at all)</option>
+                  {teams.map((t) => <option key={t} value={`team:${t}`}>What team {t} sees on radar</option>)}
+                  <option value="all">All squadrons (spectators; players could scout with it)</option>
+                </select>
+              </Field>
               <button type="button" className="btn primary" disabled={busy || (!allLayers && picked.size === 0)} onClick={() => void create()}>
                 <Icon name="share" /> Create view-only link
               </button>
@@ -138,7 +148,7 @@ export function ShareDialog({ backend, map, flush, onClose }: { backend: Backend
                         <strong>{l.label || 'Untitled link'}</strong>
                         <span className="tag">{l.mode}</span>
                         <span className={`tag ${s.cls}`}>{s.text}</span>
-                        <small>{layerNames(l)} · created {new Date(l.created_at).toLocaleString()}</small>
+                        <small>{layerNames(l)} · {pictureText(l.air_picture ?? 'none')} · created {new Date(l.created_at).toLocaleString()}</small>
                       </div>
                       <button type="button" className="btn sm" onClick={() => void copy(l)}>
                         <Icon name="copy" size={14} /> {copied === l.id ? 'Copied' : 'Copy link'}

@@ -23,7 +23,7 @@ import { announceDraft, closeChannel, fetchHistory, fetchState, fetchTerrain, jo
 import { setTerrain } from '../lib/terrainLayer';
 import { TerrainLegend } from '../lib/TerrainLegend';
 import { PlayController } from './controller';
-import { AirBox, AirReportPart } from './AirPanel';
+import { AirBox, AirReportPart, EnemySquadron, SquadronDetails } from './AirPanel';
 import { effective, pointsLeft, remaining, usePlay, type PTool } from './store';
 
 const POLL_MS = 60_000;
@@ -79,6 +79,7 @@ function Game({ token }: { token: string }) {
   const state = usePlay((s) => s.state);
   const hint = usePlay((s) => s.hint);
   const viewing = usePlay((s) => s.viewing);
+  const showRadar = usePlay((s) => s.showRadar);
 
   /** Bind this browser to the invite. The server answers with what is missing (a PIN) instead of failing. */
   const attempt = (withPin: string | null) => {
@@ -232,6 +233,10 @@ function Game({ token }: { token: string }) {
               {!turn ? 'No turn open' : turn.status === 'locked' ? `Turn ${turn.number} · locked for review` : turn.frozen ? `Turn ${turn.number} · deadline passed` : `Turn ${turn.number}${turn.deadline ? ` · due ${fmtWhen(turn.deadline)}` : ''}`}
             </span>
             <span className="grow" />
+            {(state.air?.sensors.length ?? 0) > 0 && (
+              <button type="button" className={`btn sm${showRadar ? ' on' : ''}`} aria-pressed={showRadar} title="Your side's radar coverage: enemy aircraft inside it show on your map"
+                onClick={() => usePlay.setState({ showRadar: !showRadar })}>Radar</button>
+            )}
             <button type="button" className={`btn sm${tool === 'measure' ? ' on' : ''}`} aria-pressed={tool === 'measure'} onClick={() => usePlay.getState().setTool(tool === 'measure' ? 'select' : 'measure')}>Measure</button>
             <button type="button" className="btn sm" onClick={() => setExporting(true)}>Export</button>
             <button type="button" className={`btn sm${terrainOn ? ' on' : ''}`} aria-pressed={terrainOn} onClick={() => setTerrainOn(!terrainOn)}>Terrain</button>
@@ -252,7 +257,7 @@ function Game({ token }: { token: string }) {
                 <TurnBox refresh={() => refreshRef.current()} announce={() => announceDraft(channel.current)} />
                 <TechBox openTree={() => setTreeOpen(true)} />
                 <Tools />
-                <AirBox refresh={() => refreshRef.current()} />
+                <AirBox />
                 <DraftList />
                 <LastTurn />
                 <CombatReportBox />
@@ -261,7 +266,7 @@ function Game({ token }: { token: string }) {
               <button type="button" className="btn panelshow" onClick={() => setPanelOpen(true)}>Orders ▴</button>
             )
           )}
-          <Details />
+          <Details refresh={() => refreshRef.current()} />
           {treeOpen && <TechModal onClose={() => setTreeOpen(false)} />}
           {tool === 'measure' && <div className="measurebox right"><MeasurePanel m={measureRef.current} s={measured} onClose={() => usePlay.getState().setTool('select')} /></div>}
           {terrainOn && <TerrainLegend empty={terrainEmpty} />}
@@ -453,6 +458,7 @@ function TechModal({ onClose }: { onClose(): void }) {
   const state = usePlay((s) => s.state!);
   const draft = usePlay((s) => s.draft);
   const [sel, setSel] = useState<string | null>(null);
+  const [tree, setTree] = useState<'main' | 'missiles'>('main');
   const { economy, tech } = state;
   const editable = !!state.turn && !state.turn.frozen;
   const left = pointsLeft();
@@ -504,7 +510,13 @@ function TechModal({ onClose }: { onClose(): void }) {
           <span>Research <b>{fmtPts(left.research)}</b></span>
           <span>Income +{fmtPts(economy.income.spawn)} / +{fmtPts(economy.income.research)} per turn</span>
         </p>
-        <TechTree items={tech} icon={techIcon} status={status} selected={sel} onPick={(it) => setSel(it?.id ?? null)} footer={footer} />
+        {tech.some((x) => x.tree === 'missiles') && (
+          <div className="seg" role="group" aria-label="Tree">
+            <button type="button" className={tree === 'main' ? 'on' : ''} onClick={() => setTree('main')}>Units and aircraft</button>
+            <button type="button" className={tree === 'missiles' ? 'on' : ''} onClick={() => setTree('missiles')}>Missiles</button>
+          </div>
+        )}
+        <TechTree items={tech.filter((x) => (x.tree ?? 'main') === tree)} icon={techIcon} status={status} selected={sel} onPick={(it) => setSel(it?.id ?? null)} footer={footer} />
         {picked && (
           <div className="quote">
             <strong>{picked.name}</strong>
@@ -586,7 +598,7 @@ function LastTurn() {
   );
 }
 
-function Details() {
+function Details({ refresh }: { refresh(): Promise<void> }) {
   const sel = usePlay((s) => s.sel);
   // Re-render when the draft, the live state or the viewed turn changes under the selection.
   usePlay((s) => s.draft);
@@ -600,7 +612,8 @@ function Details() {
   const mine = e.mine && editable;
   const p = f.props;
   const isPoint = f.geometry.type === 'Point';
-  const canTurn = isPoint && f.kind !== 'circle' && f.kind !== 'text';
+  const isAir = !!st.state?.air?.squadrons.some((q) => q.id === sel);
+  const canTurn = isPoint && f.kind !== 'circle' && f.kind !== 'text' && !isAir;
   const removing = change?.op === 'delete';
   const order = change?.op === 'update' ? change.payload.order ?? '' : '';
   const range = st.state?.radii[sel];
@@ -643,11 +656,12 @@ function Details() {
         <dl>
           {p.type && <div><dt>Type</dt><dd>{p.type}</dd></div>}
           {p.speed && <div><dt>Speed</dt><dd>{p.speed}</dd></div>}
-          {e.mine && st.state?.turn && <div><dt>Range</dt><dd>{range == null ? 'unlimited' : range === 0 ? 'cannot move this turn' : `${fmtDist(range)} from where it started the turn`}</dd></div>}
+          {e.mine && st.state?.turn && !isAir && <div><dt>Range</dt><dd>{range == null ? 'unlimited' : range === 0 ? 'cannot move this turn' : `${fmtDist(range)} from where it started the turn`}</dd></div>}
           {isPoint && <div><dt>Position</dt><dd>{fmtLatLon(f.geometry.coordinates as Pos)}</dd></div>}
         </dl>
       )}
-      {!isNew && st.state?.combat?.own[sel] && <OwnCombat fid={sel} editable={mine} />}
+      {!isNew && isAir && <SquadronDetails id={sel} editable={mine} refresh={refresh} />}
+      {!isNew && !isAir && st.state?.combat?.own[sel] && <OwnCombat fid={sel} editable={mine} />}
       {!isNew && !e.mine && !st.viewing && st.state?.combat && <OtherCombat fid={sel} />}
       {!isNew && p.notes && <p className="notes">{p.notes}</p>}
 
@@ -734,23 +748,8 @@ function OwnCombat({ fid, editable }: { fid: string; editable: boolean }) {
 function OtherCombat({ fid }: { fid: string }) {
   const seen = usePlay((s) => s.state!.combat.seen[fid]);
   const km = usePlay((s) => s.state!.combat.intel_km);
-  const air = usePlay((s) => s.state!.air);
-  const exact = air?.revealed[fid];
-  const base = air?.enemy_bases.find((b) => b.base === fid);
-  const rsq = air?.revealed_squadrons.filter((q) => q.base === fid) ?? [];
-  if (exact || base || rsq.length) {
-    return (
-      <div className="revealed">
-        {exact && <p>Recon (last turn, exact): {exact.type}, strength {exact.strength} / {exact.max}</p>}
-        {rsq.length > 0 ? (
-          <p>Squadrons here (recon): {rsq.map((q) => `${q.name}, ${q.aircraft} / ${q.max} ${q.airframe}`).join('; ')}</p>
-        ) : base && (
-          <p>Airbase with {base.squadrons.length} squadron{base.squadrons.length === 1 ? '' : 's'}: {base.squadrons.map((b, i) => <span key={i} className={`band ${b.replace(' ', '-')}`}>{b}</span>)}</p>
-        )}
-        {!exact && seen?.ground && <p>Estimated condition: <span className={`band ${seen.band.replace(' ', '-')}`}>{seen.band}</span></p>}
-      </div>
-    );
-  }
+  const enemyAir = usePlay((s) => !!s.state!.air?.enemy[fid]);
+  if (enemyAir) return <EnemySquadron id={fid} />;
   if (!seen) return <p className="tip">No intel: none of your units is within {km} km.</p>;
   if (!seen.ground) return null;
   return <p>Estimated condition: <span className={`band ${seen.band.replace(' ', '-')}`}>{seen.band}</span></p>;
@@ -760,7 +759,7 @@ function OtherCombat({ fid }: { fid: string }) {
 function CombatReportBox() {
   const r = usePlay((s) => s.state!.combat?.report);
   const a = r?.air;
-  if (!r || (!r.own.length && !r.engagements.length && !(a && (a.squadrons.length || a.strikes.length || a.recon.length || a.downed)))) return null;
+  if (!r || (!r.own.length && !r.engagements.length && !(a && (a.squadrons.length || a.strikes.length || a.downed)))) return null;
   return (
     <section className="section">
       <header><h3>Combat report, turn {r.turn}</h3></header>

@@ -103,7 +103,7 @@ function Split({ list, form }: { list: ReactNode; form: ReactNode }) {
 // Unit templates
 // ---------------------------------------------------------------------------
 
-const BLANK_T: UnitTemplate = { id: '', name: '', max_strength: 1000, armor: 10, category: 'ground', asset_id: null, sidc: null, weapon_ids: [], deleted_at: null, air_capacity: 0, aps: 0 };
+const BLANK_T: UnitTemplate = { id: '', name: '', max_strength: 1000, armor: 10, category: 'ground', asset_id: null, sidc: null, weapon_ids: [], deleted_at: null, air_capacity: 0, aps: 0, sensor_m: 0 };
 
 function TemplatesTab({ backend, map, busy, run }: { backend: Backend; map: MapMeta; busy: boolean; run: Run }) {
   const { templates, weapons } = useEd((s) => s.combat!);
@@ -165,6 +165,10 @@ function TemplatesTab({ backend, map, busy, run }: { backend: Backend; map: MapM
             <Field label="Airbase: squadrons it can hold (0 = none)"><input type="number" min={0} max={100} value={edit.air_capacity ?? 0} onChange={(e) => set({ air_capacity: Math.round(num(e.target.value, 0, 100)) })} /></Field>
             <Field label="Active protection vs AGMs (%)"><input type="number" min={0} max={100} value={edit.aps ?? 0} onChange={(e) => set({ aps: num(e.target.value, 0, 100) })} /></Field>
           </div>
+          <Field label="Radar / early warning range (km; sees aircraft within it × their signature, while emitting)" wide>
+            <input type="number" min={0} step="any" value={+((edit.sensor_m ?? 0) / 1000).toFixed(1)} onChange={(e) => set({ sensor_m: num(e.target.value) * 1000 })} />
+          </Field>
+          <p className="tip">A naval template with air capacity is a carrier: a base that moves, its squadrons with it.</p>
           <Field label="Category" wide>
             <select value={edit.category} onChange={(e) => set({ category: e.target.value as UnitTemplate['category'] })}>
               <option value="ground">Ground</option>

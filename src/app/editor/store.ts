@@ -30,6 +30,8 @@ interface Ed extends Doc {
   showTerrain: boolean;
   /** Airframes, missile families and tiers, squadrons and airbases. */
   air: import('../lib/types').AirAdmin | null;
+  /** Side whose radar coverage the map shows (team name, or player id without a team); null = none. */
+  airCoverage: string | null;
   /** Draw all drafts, zones and conflicts over the live map (turn panel open). */
   showDrafts: boolean;
   /** The player whose draft is being edited. While set, the live map is locked. */
@@ -99,6 +101,7 @@ export const useEd = create<Ed>()((set, get) => ({
   combat: null,
   showTerrain: false,
   air: null,
+  airCoverage: null,
   viewing: null,
   selection: [],
   tool: 'select',

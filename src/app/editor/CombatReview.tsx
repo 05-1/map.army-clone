@@ -21,7 +21,7 @@ interface Saved {
  */
 export async function ensureCombatPreview(backend: Backend, turnId: string): Promise<'none' | 'kept' | 'computed'> {
   const [saved, inputs] = await Promise.all([backend.getCombatPreview(turnId), backend.getCombatInputs(turnId)]);
-  if (!inputs.units.length && !inputs.engagements.length && !inputs.squadrons?.length) return 'none';
+  if (!inputs.units.length && !inputs.engagements.length && !inputs.air_units?.length) return 'none';
   if (saved && !saved.stale) return 'kept';
   const data: PreviewData = saved?.data ? { ...saved.data, edits: {} } : { salt: newSalt(), salts: {}, edits: {} };
   await backend.saveCombatPreview(turnId, data, resolveCombat(inputs, data));
@@ -164,7 +164,7 @@ function PhaseTable({ phase, data, busy, onEdit }: { phase: Phase; data: Preview
   );
 }
 
-/** The air phase: each strike or recon package with its interceptions, SEAD, AA and strike; missions that never flew. */
+/** The air phase: each exchange, AA site and strike with every shot; then refuelling, forced returns and notes. */
 function AirReview({ r, data, busy, compute }: { r: CombatResult; data: PreviewData; busy: boolean; compute(d: PreviewData): void }) {
   const a = r.air!;
   const [open, setOpen] = useState<string | null>(null);
@@ -174,32 +174,37 @@ function AirReview({ r, data, busy, compute }: { r: CombatResult; data: PreviewD
     else edits[key] = v;
     compute({ ...data, edits });
   };
-  const flew = a.squadrons.filter((q) => q.mission || q.lost);
+  const name = (id: string | null) => a.squadrons.find((q) => q.id === id)?.name ?? '?';
+  const changed = a.squadrons.filter((q) => q.lost || q.fired || q.forced || q.refueled_by || q.state === 'airborne');
   return (
     <>
       <h4>Air</h4>
-      {flew.length === 0 && !a.log.failed.length && <p className="empty">No air missions this turn.</p>}
-      {flew.length > 0 && (
+      {changed.length === 0 && !a.log.packages.length && <p className="empty">No air action this turn.</p>}
+      {changed.length > 0 && (
         <table className="shots">
-          <thead><tr><th>Squadron</th><th>Mission</th><th>Aircraft</th></tr></thead>
+          <thead><tr><th>Squadron</th><th>Ends the turn</th><th>Aircraft</th></tr></thead>
           <tbody>
-            {flew.map((q) => (
-              <tr key={q.id}><td>{q.name}</td><td>{q.mission ?? '-'}</td><td className="num">{q.before} → {q.after}{q.lost ? ` (−${q.lost})` : ''}</td></tr>
+            {changed.map((q) => (
+              <tr key={q.id}>
+                <td>{q.name}</td>
+                <td>{q.stranded ? 'stranded (no base)' : q.state === 'landed' ? 'landed' : 'airborne'}{q.refueled_by ? `, refuelled by ${name(q.refueled_by)}` : ''}
+                  {q.forced ? <><br /><small className="bad">forced home: {q.forced}{q.grounded ? ', grounded next turn' : ''}</small></> : null}</td>
+                <td className="num">{q.before} → {q.after}{q.lost ? ` (−${q.lost})` : ''}</td>
+              </tr>
             ))}
           </tbody>
         </table>
       )}
-      {a.strikes.map((st) => (
-        <p key={st.squadron} className="tip">
-          Strike by {st.squadron_name} on {st.target_name}: {st.aborted ?? `${st.hits} of ${st.shots} hit, ${st.damage} damage${st.destroyed ? ', target destroyed' : ''}`}
+      {a.strikes.map((st, i) => (
+        <p key={i} className="tip">
+          {st.squadron_name} on {st.target_name}: {st.shots ? `${st.hits} of ${st.shots} hit, ${st.damage} damage${st.destroyed ? ', target destroyed' : ''}` : `no shots (${st.aborted ?? 'nothing to fire'})`}
         </p>
       ))}
-      {a.reveals.map((rv, i) => <p key={i} className="tip">Recon by {rv.squadron_name} reveals everything within {Math.round(rv.radius_m / 1000)} km of its target to its player.</p>)}
       {a.log.packages.map((pk) => (
         <div key={pk.id} className="engcard">
           <header>
             <strong>{pk.label}</strong>
-            <span className="tag">{pk.phases.length} phase{pk.phases.length === 1 ? '' : 's'}</span>
+            <span className="tag">{pk.phases.reduce((n, p) => n + p.shots.length, 0)} shots</span>
             <span className="grow" />
             <button type="button" className="btn sm" disabled={busy} onClick={() => compute({ ...data, salts: { ...data.salts, [pk.id]: newSalt() } })}>Re-roll</button>
             <button type="button" className="btn sm" onClick={() => setOpen(open === pk.id ? null : pk.id)}>{open === pk.id ? 'Hide shots' : 'Show shots'}</button>
@@ -207,11 +212,9 @@ function AirReview({ r, data, busy, compute }: { r: CombatResult; data: PreviewD
           {open === pk.id && pk.phases.map((ph, i) => <AirShotTable key={i} phase={ph} busy={busy} onEdit={(k, v) => edit(k, v)} />)}
         </div>
       ))}
-      {a.log.failed.length > 0 && (
-        <>
-          <h4>Missions that did not fly</h4>
-          <ul className="changes">{a.log.failed.map((f) => <li key={f.squadron}><div className="row"><span>{f.name}: <small>{f.reason}</small></span></div></li>)}</ul>
-        </>
+      {a.log.refuel.map((t) => <p key={t.tanker} className="tip">Tanker {t.name}: refuelled {t.served.map(name).join(', ') || 'no one'} ({t.served.length} of {t.capacity}).</p>)}
+      {a.log.notes.length > 0 && (
+        <ul className="changes">{a.log.notes.map((n, i) => <li key={i}><div className="row"><span>{n.name}: <small>{n.text}</small></span></div></li>)}</ul>
       )}
     </>
   );

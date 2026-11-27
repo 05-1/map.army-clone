@@ -25,10 +25,10 @@ interface Play {
   drawing: number;
   /** Picking a target on the map for one weapon of one of the player's units. */
   targeting: { fid: string; slot: number } | null;
-  /** Picking the target of a squadron's mission on the map. */
-  airPick: { squadron: string; type: 'strike' | 'patrol' | 'recon'; radius_m?: number } | null;
-  /** The squadron whose card is open (its radius ring is drawn). */
-  airSel: string | null;
+  /** Picking a target on the map for this squadron. */
+  airTarget: string | null;
+  /** Draw this side's radar coverage. */
+  showRadar: boolean;
   sel: string | null;
   hint: string;
   /** A past turn shown read-only in place of the live map. */
@@ -59,11 +59,7 @@ let saving = false;
 let again = false;
 
 export const usePlay = create<Play>()((set, get) => {
-  const change = (next: Change[]) => {
-    // An escort needs its strike: escorts of a strike that was cancelled or changed go with it.
-    const strikes = new Set(next.filter((c) => c.op === 'mission' && c.payload.type === 'strike').map((c) => c.feature_id));
-    const draft = next.filter((c) => c.op !== 'mission' || c.payload.type !== 'escort' || strikes.has(c.payload.escort_of ?? ''));
-    if (draft.length < next.length) get().say('Its escort was stood down too.');
+  const change = (draft: Change[]) => {
     set({ draft, saveStatus: 'dirty' });
     clearTimeout(saveTimer);
     saveTimer = window.setTimeout(() => void get().flush(), SAVE_DELAY_MS);
@@ -80,8 +76,8 @@ export const usePlay = create<Play>()((set, get) => {
     buyId: null,
     drawing: 0,
     targeting: null,
-    airPick: null,
-    airSel: null,
+    airTarget: null,
+    showRadar: false,
     sel: null,
     hint: '',
     viewing: null,
@@ -162,7 +158,7 @@ export const usePlay = create<Play>()((set, get) => {
       }
     },
     // Any tool but select closes the details box, which would otherwise sit over the map (on a phone above all).
-    setTool: (tool, allocId = null) => set({ tool, allocId, buyId: null, hint: '', targeting: null, airPick: null, ...(tool !== 'select' ? { sel: null } : {}) }),
+    setTool: (tool, allocId = null) => set({ tool, allocId, buyId: null, hint: '', targeting: null, airTarget: null, ...(tool !== 'select' ? { sel: null } : {}) }),
     startBuy: (buyId) => set({ tool: 'buy', buyId, allocId: null, hint: '', sel: null }),
     say(hint) {
       set({ hint });

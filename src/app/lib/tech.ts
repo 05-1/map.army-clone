@@ -112,7 +112,7 @@ export function draftCost(changes: readonly Change[], items: readonly TechItem[]
   for (const c of changes) {
     if (rejected.includes(c.feature_id)) continue;
     if (c.op === 'research') research += byId.get(c.feature_id)?.research_cost ?? 0;
-    else if ((c.op === 'create' || c.op === 'buy_squadron') && c.payload.purchase_id) spawn += byId.get(c.payload.purchase_id)?.spawn_cost ?? 0;
+    else if (c.op === 'create' && c.payload.purchase_id) spawn += byId.get(c.payload.purchase_id)?.spawn_cost ?? 0;
     else if (c.op === 'buy_aircraft') spawn += aircraftCost(c.payload.squadron) * c.payload.count;
   }
   return { spawn, research };

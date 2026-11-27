@@ -106,6 +106,11 @@ function Workspace({ backend, who, meta, maps, setMaps, onSignOut, onSwitch, onP
   const [teching, setTeching] = useState<TechTab | null>(null);
   const [fighting, setFighting] = useState<CombatTab | null>(null);
   const [flying, setFlying] = useState<AirTab | null>(null);
+  const [airFocus, setAirFocus] = useState<string | null>(null);
+  const airCoverage = useEd((s) => s.airCoverage);
+  const airSensors = useEd((s) => s.air?.sensors);
+  const edPlayers = useEd((s) => s.players);
+  const airSides = Object.keys(airSensors ?? {}).map((k) => [k, edPlayers.find((p) => p.id === k)?.name ?? k] as const);
   const refreshAir = useCallback(async () => {
     const [a, c] = await Promise.all([backend.getAirAdmin(meta.id), backend.getCombatAdmin(meta.id)]);
     useEd.setState({ air: a, combat: c });
@@ -347,7 +352,14 @@ function Workspace({ backend, who, meta, maps, setMaps, onSignOut, onSwitch, onP
         <button type="button" className="btn" onClick={() => setManagingPlayers(true)}>Players</button>
         <button type="button" className="btn" title="Tech tree, player points and spawn zones" onClick={() => (useEd.setState({ zoneDraw: false }), setTeching('tree'))}>Tech</button>
         <button type="button" className="btn" title="Unit templates, weapons, combat settings, terrain, sandbox" onClick={() => setFighting('units')}>Combat</button>
-        <button type="button" className="btn" title="Squadrons, airframes, missiles, countermeasures, air settings, air sandbox" onClick={() => setFlying('squadrons')}>Air</button>
+        <button type="button" className="btn" title="Squadrons, airframes, roles, missiles, countermeasures, air settings, air sandbox" onClick={() => setFlying('squadrons')}>Air</button>
+        {airSides.length > 0 && (
+          <select className="compact" aria-label="Radar coverage on the map" title="Show one side's radar coverage (what it can see, at signature 1)" value={airCoverage ?? ''}
+            onChange={(e) => useEd.setState({ airCoverage: e.target.value || null })}>
+            <option value="">Radar: off</option>
+            {airSides.map(([k, name]) => <option key={k} value={k}>Radar: {name}</option>)}
+          </select>
+        )}
         <button
           type="button"
           className={`btn${turnOpen ? ' on' : ''}`}
@@ -393,7 +405,7 @@ function Workspace({ backend, who, meta, maps, setMaps, onSignOut, onSwitch, onP
             {tool === 'asset' && <AssetLibrary backend={backend} />}
             {tool === 'measure' && <Section title="Measure"><MeasurePanel m={measureRef.current} s={measured} onClose={() => st().setTool('select')} /></Section>}
             {tool !== 'select' && tool !== 'symbol' && tool !== 'asset' && tool !== 'measure' && <StylePanel />}
-            {hasSel && <PropertiesPanel onAssign={assign} backend={backend} refreshCombat={refreshCombat} />}
+            {hasSel && <PropertiesPanel onAssign={assign} backend={backend} refreshCombat={refreshCombat} onSquadron={(id) => (setAirFocus(id), setFlying('squadrons'))} />}
             {tool === 'select' && !hasSel && <Help />}
           </>
         )}
@@ -416,7 +428,7 @@ function Workspace({ backend, who, meta, maps, setMaps, onSignOut, onSwitch, onP
           prepare={() => st().select([])} onClose={() => setExporting(false)}
         />
       )}
-      {flying && <AirDialog backend={backend} map={meta} tab={flying} refresh={refreshAir} onClose={() => (setFlying(null), void refreshAir().catch(() => {}))} />}
+      {flying && <AirDialog backend={backend} map={meta} tab={flying} focus={airFocus} refresh={refreshAir} onClose={() => (setFlying(null), setAirFocus(null), void refreshAir().catch(() => {}))} />}
       {fighting && (
         <CombatDialog backend={backend} map={meta} tab={fighting} getMap={() => map} refresh={refreshCombat}
           onTerrain={() => setTerrainRev((n) => n + 1)} onClose={() => (setFighting(null), void refreshCombat().catch(() => {}))} />

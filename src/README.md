@@ -74,7 +74,7 @@ Players can buy their own reinforcements instead of you allocating them.
 
 Units fight when they have a **unit template** (Combat > Unit templates): max strength, armor, category, and one or more **weapons**
 (Combat > Weapons: attacks, AP, range, indirect). A unit gets its template from its properties ("Unit template"), from its tech item, or by
-matching the template's NATO symbol or graphic. Air and naval units are left out of ground combat for now.
+matching the template's NATO symbol or graphic. Squadrons and naval units take no part in ground combat (see Air combat).
 
 - **Players** pick a target per weapon on their own units (unit details > Pick target, then click the enemy), or leave it empty to return fire
   when attacked. An engaged unit cannot move; ticking **Retreat** lets it leave after one parting round of enemy fire.
@@ -97,6 +97,53 @@ matching the template's NATO symbol or graphic. Air and naval units are left out
   stores the zones once (PostGIS). Coverage (open / urban / forest %) shows afterwards; change a threshold and regenerate in one click. Urban takes
   ×0.7 and forest ×0.8 damage by default. Everyone can switch the terrain overlay on ("Terrain" button) with a legend.
 
+### Air combat
+
+Squadrons are units on the map. Each is either **landed** at one of its player's airbases or carriers, or **airborne** at a
+map position. Strength is the number of aircraft; damage accumulates, and every full airframe HP of it downs one aircraft.
+
+- **Owner setup (Air window):**
+  1. Combat > Unit templates: give the airbase template an **air capacity** (squadrons it holds; a naval template makes it a carrier,
+     a base that moves) and, for radars, a **radar / early warning range**. Place units with it.
+  2. Air > Missiles: "Add IR, ARH, HARM and AGM families", then "Add real-world missiles" (AIM-9M/9X, AIM-120C/D, AIM-260, AGM-88C/G,
+     AGM-65, JASSM, JASSM-ER), or add tiers yourself. Each tier is a node in the **missile tree** (its own tab in the tech tree); tier 1 is
+     free, older tiers stay usable, and a newly researched missile works on aircraft already in service.
+  3. Air > Airframes: "Start from a real aircraft…" (F-16C, F-35A, F-15C, F-22A, Su-35S, MiG-29, B-52H, B-1B, B-2A, Tu-160, KC-135R,
+     KC-46A, rounded public figures) and adjust: role, speed (max move per turn, taken as ferry range), combat radius, payload penalty,
+     hardpoints and payload, the **missile families it can carry**, radar, signature, countermeasures, gun, armor on the ground, squadron
+     size, SP per replacement. Air > Roles: fighter, multirole, bomber, tanker, plus your own (a tanker role makes its squadrons refuel others).
+  4. Tech > Tech tree: an item of kind **Squadron** per airframe (prerequisites make chains like F-16 Block 50 → F-35). Researching it
+     unlocks the airframe; buying it places a full squadron on one of the buyer's airbases. Or create squadrons yourself in Air > Squadrons.
+- **Players:** a squadron's details show aircraft, status, reach and missiles left.
+  - **Fly:** drag it. It moves up to its speed and must end inside its combat radius (with its current loadout) of one of the player's
+    airbases or carriers, or inside one of their airborne tankers' refuel circles. The dashed ring shows how far it flies, the shaded
+    circles where it may end; moves are pulled inside. "Needs tanker" marks a position that only works because of refuelling.
+  - **Land:** drop it on an airbase or carrier. Only landed squadrons change their loadout (free, instant, rearms to it) and take
+    replacements. Missiles fired in the air are gone until it lands again.
+  - **Attack:** "Add a target", then click any enemy unit, or an enemy squadron on your radar. Every loaded missile that can hit it and
+    reaches it from where the squadron ends its move is assigned with all that is left; trim each salvo with − / +. No limit on targets or
+    salvo size beyond range and ammo. "Return fire" sets how many missiles per aircraft per phase it fires back when attacked.
+  - **Tankers:** a tanker's details list the squadrons that need it this turn in priority order (↑ ↓); beyond its capacity they are forced home.
+  - **Radar** button: your side's coverage. Enemy squadrons appear only inside it, with type and an estimate band.
+- **Order at push:** movement; air-to-air; AA auto-fire; HARMs; strikes; ground combat; refuelling (with what each tanker has left);
+  forced returns. Territory capture is not part of the game yet.
+  - Air-to-air: attackers that declared on a squadron fight it and its friends within 25 km. Beyond visual range, radar missiles fire at
+    targets within min(missile range, detection range); detection = radar range × the target's signature; the side that detects first fires
+    first, then the longer missile range, else both at once. Then IR missiles, then guns, at once.
+  - AA: every AA weapon fires its shots at each enemy squadron that ends its move within range. Radar AA that is dark aims at half accuracy,
+    cannot be HARMed and gives no radar picture; IR AA is unaffected.
+  - Hit chance = accuracy − the target's countermeasure for that guidance (ECM vs radar, flares vs IR, manoeuvrability vs guns, active
+    protection vs AGMs), kept between 5 and 95%. Damage to aircraft is the weapon's damage; to ground units, ships and landed squadrons
+    damage × min(AP ÷ armor, 1.5), plus terrain and dug-in for ground units.
+  - A squadron that ends outside every base radius and tanker circle (base destroyed, carrier moved, tanker lost or full) flies to its
+    nearest base with room and is grounded next turn; with no base anywhere it is stranded until you rebase it.
+- **Fog:** the server works out each side's radar picture (teams share it; bases and tankers are per player). Squadrons outside it are never
+  sent, live or in the turn history (stored per push). Share links have an **air picture**: none (default), all, or one team's view.
+- **Owner review:** the preview's Air part lists every exchange, AA site, SEAD and strike package with each shot's "accuracy −
+  countermeasure = hit %", roll and editable damage, Re-roll per package, where each squadron ends, refuelling and forced returns. On the
+  map: the selected squadron's reach, tanker circles, declared attacks, and any side's radar coverage (the "Radar" picker in the top bar).
+- **Sandbox** (Air > Sandbox): two squadrons with loadouts at a chosen distance, or a strike against a ground template with its AA.
+
 ### Map tools
 
 - **Measure** (editor: ruler tool or M; player and viewer pages: Measure button): click points for a distance, or switch to Area for area and perimeter. Double-click, Enter or Finish ends it. Nothing is saved.
@@ -108,7 +155,7 @@ Everyone has a turn slider to step back through earlier turns. Under Manage > Hi
 ## Updating to a newer version
 
 1. Upload the new `release` folder the same way as in step 2, but leave `config.js` out of the upload (or re-enter your two values afterwards).
-2. Open the site. If it says "The database needs an upgrade", paste the new `setup.sql` into the Supabase SQL editor and run it. Since schema 8 it also switches on the PostGIS extension (in the `extensions` schema); if Supabase refuses, enable PostGIS under Database > Extensions and run the file again. Running it again is always safe: it keeps your data and rebuilds only functions and rules.
+2. Open the site. If it says "The database needs an upgrade", paste the new `setup.sql` into the Supabase SQL editor and run it. Schema 11 moves squadrons from schema 10 onto the map, landed at their bases, and lets every airframe carry every missile family. Since schema 8 it also switches on the PostGIS extension (in the `extensions` schema); if Supabase refuses, enable PostGIS under Database > Extensions and run the file again. Running it again is always safe: it keeps your data and rebuilds only functions and rules.
 
 ## If something stops working
 
@@ -183,6 +230,23 @@ Nothing in this table needs Supabase or GitHub. Each control calls a database fu
 | Terrain types and their multipliers | Combat > Settings > Terrain | `save_combat_settings` |
 | Terrain overlay | "Terrain" button (all pages) | `get_terrain`, `get_player_terrain`, `get_shared_terrain` |
 | Damage sandbox | Combat > Sandbox | none (computed in the browser) |
+| **Air combat** | | |
+| Airbase or carrier capacity, radar range, active protection (APS) of a template | Combat > Unit templates | `save_unit_template` |
+| Anti-air on a weapon (guidance, accuracy, air damage, shots) | Combat > Weapons | `save_weapon` |
+| Airframes (from real-world presets): role, speed, radius, payload penalty, hardpoints, payload, families carried, radar, signature, countermeasures, gun, armor on the ground | Air > Airframes | `save_airframe`, `get_air_admin` |
+| Roles (tanker or not, payload penalty preset) | Air > Roles | `save_air_role` |
+| Missile families; add the four standard ones | Air > Missiles | `save_air_family`, `seed_air_families` |
+| Missile tiers (stats, research cost, release turn; missile-tree node kept in sync); add real-world missiles | Air > Missiles > a tier | `save_air_weapon` |
+| Countermeasures of every airframe, AA weapon and template at a glance | Air > Countermeasures | `save_airframe`, `save_weapon`, `save_unit_template` |
+| Hit clamp, dark-radar penalty, mutual support distance, return fire default, refuel circle, capacity per tanker aircraft, tankers refuelling tankers, landing distance, grounding after a forced return; versioned per turn | Air > Settings | `save_combat_settings` |
+| Squadrons: create, owner, airframe, landed at a base or airborne at a position, aircraft, damage, loadout, missiles left, grounded, stranded, return fire, delete | Air > Squadrons, or select it on the map > Edit squadron (or drag it) | `save_squadron`, `delete_squadron` |
+| Airframe research (squadron tech items) | Tech > Tech tree > an item > Kind: Squadron | `save_tech_item` |
+| Main and missile trees | Tech > Tech tree > Main tree / Missile tree | (filter only) |
+| Radar coverage per side on the map | Top bar > Radar picker | `get_air_admin` |
+| Air preview: per-shot breakdown, hand edits, re-roll one package | Turn (locked) > Combat > Air | `save_combat_preview` |
+| Air picture of a share link | Share > Air picture | `create_share_link`, `update_share_link` |
+| Air sandbox | Air > Sandbox | none (computed in the browser) |
+| Player loadout (landed only, instant) | Player page > squadron details > Change loadout | `set_loadout` |
 | **History** | | |
 | View any past turn, unfiltered | Turn slider (bottom right), or Manage > History > View | `get_snapshot` |
 | Roll back | Manage > History and backup > Roll back to here | `rollback_to` |
@@ -234,6 +298,13 @@ Client checks exist only to make the pages pleasant. These hold no matter what a
   an engagement cannot move unless ordered to retreat. Combat can only be applied by a push, from a preview built on exactly the drafts,
   units and settings of that moment.
 - Players never receive weapon numbers, armor, or any other unit's exact strength; units beyond intel range are not described at all.
+- Loadouts hold only researched missiles of families the airframe carries, within hardpoints and payload, and change only while landed.
+  A squadron moves at most its speed from where it stands and must end within its combat radius of one of its player's bases or carriers
+  (where they end the turn) or inside the refuel circle of one of their airborne tankers that is itself within reach of a real base.
+  Grounded and stranded squadrons do not move. Attacks name enemy units the player can see, enemy squadrons on their radar, and loaded
+  weapons that can hit that kind of target and reach it from the end position; all salvos together fit in the missiles left. Replacements
+  join only landed squadrons that stay put; new squadrons go on the buyer's own base with room. Players receive missile range, weight and
+  slots only, never accuracy, damage or AP, and other sides' squadrons only inside their radar picture, as type and band.
 
 Sanity limits, the only ones there are: 200 changes and 256 kB per draft, 200 players per map, PIN lockout for 15 minutes after 5 wrong tries.
 
